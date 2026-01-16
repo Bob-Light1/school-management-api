@@ -15,19 +15,8 @@ router.get("/all", getAllCampus);
 router.get("/single", authMiddleware(['CAMPUS_MANAGER', 'DIRECTOR']), getOneCampus)
 router.post("/create", strictLimiter, createCampus);
 router.post("/login",loginLimiter, loginCampus);
+
 //router.post('/reset-password', strictLimiter, resetPassword);
-router.patch("/update", authMiddleware(['CAMPUS_MANAGER', 'DIRECTOR']), updateCampus); //ONLY AUTHENTICATED USER CAN UPDATE
-
-
-// Protected routes
-//router.get('/campus/profile', authMiddleware(), getProfile);
-
-// Protected route for CAMPUS_MANAGER
-{/*router.post(
-  '/create-student',
-  authMiddleware(['CAMPUS_MANAGER']),
-  createStudent
-);
-*/}
+router.put("/update/:id", authMiddleware(['CAMPUS_MANAGER', 'DIRECTOR']), updateCampus); //ONLY AUTHENTICATED USER CAN UPDATE
 
 module.exports = router;

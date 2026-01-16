@@ -183,86 +183,123 @@ module.exports = {
   },
 
 
-  getOneCampus: async(req, res) => {
+  getOneCampus: async (req, res) => {
     try {
-      const id= req.user.id;
-      const campus = await Campus.findOne({_id:id});
+      const id = req.user.id;
       
-      if(campus){
-        res.status(200).json({
-          success:true,
-          message: "Campus fetched successfully.",
-          data:campus
-        });
-      }else{
-        res.status(404).json({
-        success:false,
-        message: `Campus not found`,
+      // findById is more direct and clear than findOne({_id:id})
+      const campus = await Campus.findById(id).select('-password');
+      
+      if (!campus) {
+        return res.status(404).json({
+          success: false,
+          message: "Campus not found"
         });
       }
+  
+      res.status(200).json({
+        success: true,
+        message: "Campus retrieved successfully",
+        data: campus
+      });
+  
     } catch (error) {
+      console.error("Error in get-One-Campus:", error); // Added logging
       res.status(500).json({
-        success:false,
-        message: "Internal Server Error while fetching [CAMPUS DATA]."
+        success: false,
+        message: "Server error while retrieving the campus"
       });
     }
   },
 
 
-  updateCampus: async(req, res) => {
-    try {
-      const id = req.user.id;
-      const form = new formidable.IncomingForm();
-
-      form.parse(req, async(err, fields, files) => {
-
-        const campus = await Campus.findOne({_id:id});
-        
-        if(files.image){
+  updateCampus: async (req, res) => {
+    const form = new formidable.IncomingForm();
+    
+    form.parse(req, async (err, fields, files) => {
+      if (err) {
+        console.error("Formidable error:", err);
+        return res.status(400).json({ 
+          success: false, 
+          message: "Error processing the form" 
+        });
+      }
+  
+      try {
+        const id = req.user.id;
+        const campus = await Campus.findById(id);
+  
+        if (!campus) {
+          return res.status(404).json({ 
+            success: false, 
+            message: "Campus not found" 
+          });
+        }
+  
+        // Image handling
+        if (files.image?.[0]) {
           const photo = files.image[0];
-          let filepath = photo.filepath;
-          let originalFilename = photo.originalFilename.replace(" ", "_");
-
-          if(campus.campus_image){
-            let oldImagePath = path.join(
-              __dirname, 
-              process.env.SCHOOL_CAMPUS_IMAGE_PATH, 
-              campus.campus_image
-            );
-            if(fs.existsSync(oldImagePath)){
-              fs.unlink(oldImagePath, (err) =>{
-                if(err) console.log("Error deleting old Image.", err)
-              })
+          const extension = path.extname(photo.originalFilename).toLowerCase();
+          
+          // Image type validation
+          const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+          if (!allowedExtensions.includes(extension)) {
+            return res.status(400).json({ 
+              success: false, 
+              message: "Unauthorized image format" 
+            });
+          }
+  
+          // Size validation (e.g., 5MB max)
+          if (photo.size > 5 * 1024 * 1024) {
+            return res.status(400).json({ 
+              success: false, 
+              message: "Image too large (max 5MB)" 
+            });
+          }
+  
+          const newFileName = `campus_${id}_${Date.now()}${extension}`;
+          const newPath = path.join(__dirname, process.env.SCHOOL_CAMPUS_IMAGE_PATH, newFileName);
+  
+          // Delete old image
+          if (campus.campus_image) {
+            const oldImagePath = path.join(__dirname, process.env.SCHOOL_CAMPUS_IMAGE_PATH, campus.campus_image);
+            if (fs.existsSync(oldImagePath)) {
+              fs.unlinkSync(oldImagePath);
             }
           }
-          let newPath = path.join(
-            __dirname, 
-            process.env.SCHOOL_CAMPUS_IMAGE_PATH, 
-            originalFilename
-          );
-          let photoData = fs.readFileSync(filepath);
-          fs.writeFileSync(newPath, photoData);
-
-          Object.keys(fields).forEach((field) => {
-            campus[field] = fields[field][0]
-          });
-          await campus.save();
-          res.status(200).json({
-            success: true,
-            message: "Campus updated Successfully",
-            campus
-          })
+  
+          fs.copyFileSync(photo.filepath, newPath);
+          campus.campus_image = newFileName;
         }
-
-      })
-
-    } catch (error) {
-      res.status(500).json({
-        success:false, 
-        message: "Failed to update Campus!"
-      })
-    }
-  },
-
-
-}
+  
+        // Updating fields
+        const allowedUpdates = ['campus_name', 'manager_name', 'email'];
+        
+        Object.keys(fields).forEach((key) => {
+          if (allowedUpdates.includes(key) && fields[key][0]) {
+            campus[key] = fields[key][0];
+          }
+        });
+  
+        await campus.save();
+  
+        const updatedData = campus.toObject();
+        delete updatedData.password;
+  
+        res.status(200).json({
+          success: true,
+          message: "Campus successfully updated",
+          updatedCampus: updatedData
+        });
+  
+      } catch (error) {
+        console.error("Error in updateCampus:", error);
+        res.status(500).json({ 
+          success: false, 
+          message: "Error during saving" 
+        });
+      }
+    });
+  }
+};
