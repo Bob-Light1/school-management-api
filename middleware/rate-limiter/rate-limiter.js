@@ -1,40 +1,40 @@
 const rateLimit = require('express-rate-limit');
 
 /**
- * Rate limiter pour les tentatives de connexion
- * 5 tentatives par 15 minutes
+ * Rate limiter for login attempts
+ * 5 attempts per 15 minutes
  */
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // Maximum 5 tentatives
-  standardHeaders: true, // Retourne les infos dans `RateLimit-*` headers
-  legacyHeaders: false, // Désactive les headers `X-RateLimit-*`
+  max: 5, // Maximum 5 attempts
+  standardHeaders: true, // Returns information in `RateLimit-*` headers
+  legacyHeaders: false, // Disables `X-RateLimit-*` headers
   
-  // Handler personnalisé pour la réponse
+  // Custom handler for the response
   handler: (req, res) => {
     res.status(429).json({
       success: false,
       message: 'Too many login attempts. Please try again in 15 minutes.',
-      retryAfter: Math.ceil((req.rateLimit.resetTime - Date.now()) / 1000) // en secondes
+      retryAfter: Math.ceil((req.rateLimit.resetTime - Date.now()) / 1000) // in seconds
     });
   },
   
-  // Skip les requêtes réussies (optionnel)
+  // Skip successful requests (optional)
   skipSuccessfulRequests: false,
   
-  // Skip les requêtes échouées (optionnel)
+  // Skip failed requests (optional)
   skipFailedRequests: false
-  
-  // ✅ Pas besoin de keyGenerator - express-rate-limit gère automatiquement les IP (IPv4 et IPv6)
 });
 
 /**
- * Rate limiter pour les requêtes API générales
- * 100 requêtes par 15 minutes
+ * Rate limiter for general API requests
+ * 100 requests per 15 minutes
  */
+
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Maximum 100 requêtes
+  max: 100, // Maximum 100 requests
   standardHeaders: true,
   legacyHeaders: false,
   
@@ -48,12 +48,12 @@ const apiLimiter = rateLimit({
 });
 
 /**
- * Rate limiter strict pour les opérations sensibles
- * 3 tentatives par heure (création de compte, reset password, etc.)
+ * Strict rate limiter for sensitive operations
+ * 3 attempts per hour (account creation, password reset, etc.)
  */
 const strictLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 heure
-  max: 3, // Maximum 3 tentatives
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // Maximum 3 attempts
   standardHeaders: true,
   legacyHeaders: false,
   
@@ -67,11 +67,12 @@ const strictLimiter = rateLimit({
 });
 
 /**
- * Rate limiter pour les uploads de fichiers
- * 10 uploads par heure
+ * Rate limiter for file uploads
+ * 10 uploads per hour
  */
+
 const uploadLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 heure
+  windowMs: 60 * 60 * 1000, // 1 hour
   max: 10, // Maximum 10 uploads
   standardHeaders: true,
   legacyHeaders: false,
@@ -84,17 +85,17 @@ const uploadLimiter = rateLimit({
     });
   },
   
-  // Skip si le fichier est trop gros (géré par multer)
+  // Skip if the file is too large (handled by multer)
   skip: (req) => {
     return req.fileTooLarge === true;
   }
 });
 
 /**
- * Rate limiter personnalisable
- * @param {number} windowMinutes - Fenêtre de temps en minutes
- * @param {number} maxRequests - Nombre maximum de requêtes
- * @param {string} customMessage - Message personnalisé
+ * Customizable rate limiter
+ * @param {number} windowMinutes - Time window in minutes
+ * @param {number} maxRequests - Maximum number of requests
+ * @param {string} customMessage - Custom message
  */
 const createCustomLimiter = (windowMinutes, maxRequests, customMessage = null) => {
   return rateLimit({

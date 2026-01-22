@@ -30,7 +30,7 @@ const courseSchema = new mongoose.Schema(
       required: true,
     },
 
-    // Infos principales
+    // Main Informations
     title: {
       type: String,
       required: true,
@@ -63,7 +63,7 @@ const courseSchema = new mongoose.Schema(
       default: "fr",
     },
 
-    // Contenu
+    // Content
     duration: {
       type: Number, // minutes
       required: true,
@@ -81,7 +81,7 @@ const courseSchema = new mongoose.Schema(
       default: "default-course.png",
     },
 
-    // Prix & accès
+    // Price & access
     price: {
       type: Number,
       default: 0,
@@ -110,7 +110,7 @@ const courseSchema = new mongoose.Schema(
       type: Date,
     },
 
-    // Statistiques
+    // Statistics
     studentsCount: {
       type: Number,
       default: 0,
@@ -121,7 +121,7 @@ const courseSchema = new mongoose.Schema(
       count: { type: Number, default: 0 },
     },
 
-    // SEO / recherche
+    // SEO / search
     tags: [
       {
         type: String,

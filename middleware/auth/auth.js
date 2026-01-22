@@ -1,14 +1,14 @@
 const jwt = require("jsonwebtoken");
 
 /**
- * Middleware d'authentification JWT avec contrôle de rôles
- * @param {Array<string>} roles - Liste des rôles autorisés (optionnel)
- * @returns {Function} Middleware Express
+ * JWT authentication middleware with role control
+ * @param {Array<string>} roles - List of authorized roles (optional)
+ * @returns {Function} Express middleware
  */
 const authMiddleware = (roles = []) => {
   return (req, res, next) => {
     try {
-      // ✅ 1. Extraction du token avec le bon format
+      // Extracting the token with the correct format
       const authHeader = req.header("Authorization");
       
       if (!authHeader) {
@@ -18,7 +18,7 @@ const authMiddleware = (roles = []) => {
         });
       }
 
-      // ✅ 2. Extraction correcte du token (avec l'espace)
+      // Correct extraction of the token (with the space)
       const token = authHeader.replace("Bearer ", "").trim();
       
       if (!token) {
@@ -28,7 +28,7 @@ const authMiddleware = (roles = []) => {
         });
       }
 
-      // ✅ 3. Vérification de JWT_SECRET
+      // Checking JWT_SECRET
       const jwtSecret = process.env.JWT_SECRET;
       if (!jwtSecret) {
         console.error("❌ JWT_SECRET is not defined in environment variables");
@@ -38,13 +38,13 @@ const authMiddleware = (roles = []) => {
         });
       }
 
-      // ✅ 4. Vérification et décodage du token
+      // Verifying and decoding the token
       const decoded = jwt.verify(token, jwtSecret);
       
-      // ✅ 5. Ajout des informations utilisateur à la requête
+      // Adding user information to the request
       req.user = decoded;
 
-      // ✅ 6. Vérification des rôles si spécifiés
+      // Checking roles if specified
       if (roles.length > 0) {
         if (!req.user.role) {
           return res.status(403).json({
@@ -61,13 +61,13 @@ const authMiddleware = (roles = []) => {
         }
       }
 
-      // ✅ 7. Tout est OK, passer au middleware suivant
+      // Everything is OK, proceed to the next middleware
       next();
 
     } catch (error) {
       console.error("❌ Auth middleware error:", error.message);
 
-      // ✅ 8. Gestion des erreurs spécifiques JWT
+      // Handling specific JWT errors
       if (error.name === "JsonWebTokenError") {
         return res.status(401).json({
           success: false,
@@ -89,7 +89,7 @@ const authMiddleware = (roles = []) => {
         });
       }
 
-      // ✅ 9. Erreur générique
+      // Generic error
       return res.status(500).json({
         success: false,
         message: "Authentication error occurred"

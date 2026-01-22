@@ -1,12 +1,57 @@
 const mongoose = require('mongoose');
 
-const classSchema = new mongoose.Schema({
-  schoolCampus: {type: mongoose.Schema.ObjectId, ref: 'SchoolCampus'},
-  level: {type: mongoose.Schema.ObjectId, ref:'Level'},
-  class_name: {type: String, required: true},
-  class_manager: {type:mongoose.Schema.ObjectId, ref: 'Teacher'},
+const classSchema = new mongoose.Schema(
+  {
+    schoolCampus: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'SchoolCampus',
+      required: true,
+    },
 
-  createdAt: {type:Date, default: new Date()}
-});
+    level: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Level',
+      required: true
+    },
 
-module.exports = mongoose.model('Classes', classSchema)
+    className: {
+      type: String,
+      required: true,
+      trim: true
+    },
+
+    classManager: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Teacher'
+    },
+
+    students: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Student'
+      }
+    ],
+
+    status: {
+      type: String,
+      enum: ['active', 'inactive', 'archived'],
+      default: 'active'
+    },
+
+    maxStudents: {
+      type: Number,
+      default: 50
+    }
+  },
+  {
+    timestamps: true // createdAt + updatedAt automatic
+  }
+);
+
+// Prevents duplicate classes in the same campus and level
+classSchema.index(
+  { schoolCampus: 1, level: 1, className: 1 },
+  { unique: true }
+);
+
+module.exports = mongoose.model('Class', classSchema);

@@ -29,6 +29,11 @@ app.set('trust proxy', 1);
 
 // ROUTERS IMPORT
 const campusRouter = require("./routers/campus.router");
+const classRouter = require("./routers/class.router");
+const levelRouter = require("./routers/level.router");
+const teacherRouter = require("./routers/teacher.router");
+const subjectRouter = require("./routers/subject.router");
+const studentRouter = require("./routers/student.router");
 
 // MONGODB CONNECTION
 mongoose
@@ -45,6 +50,11 @@ app.use('/api/', apiLimiter);
 
 // ROUTERS
 app.use("/api/campus", campusRouter);
+app.use("/api/class", classRouter);
+app.use('/api/level', levelRouter);
+app.use('/api/teacher', teacherRouter);
+app.use('/api/subject', subjectRouter);
+app.use('/api/student', studentRouter);
 
 // Error handler
 app.use((err, req, res, next) => {
