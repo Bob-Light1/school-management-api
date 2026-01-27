@@ -1,9 +1,9 @@
-// student.controller.js
 require('dotenv').config();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const fs = require('fs');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 
 const Student = require('../models/student.model');
 
@@ -18,7 +18,14 @@ module.exports = {
    */
   createStudent: async (req, res) => {
     try {
-      const { email, username, password, ...rest } = req.body;
+      // Handle both JSON and FormData
+      const fields = req.fields || req.body;
+      const files = req.files || {};
+
+      console.log('Fields received:', fields);
+      console.log('Files received:', files);
+
+      const { email, username, password, ...rest } = fields;
 
       // Validate required fields
       if (!email || !username || !password) {
@@ -59,10 +66,14 @@ module.exports = {
       }
 
       // Handle image upload securely
-      let imagePath = "";
-      if (files.image?.[0]) {
-        const photo = files.image[0];
-        const extension = path.extname(photo.originalFilename).toLowerCase();
+      let profileImage = "";
+      
+      // Check for profileImage in files object
+      const imageFile = files.profileImage?.[0] || files.profileImage;
+      
+      if (imageFile) {
+        const photo = imageFile;
+        const extension = path.extname(photo.originalFilename || photo.name || '').toLowerCase();
         
         // Validate file type
         const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
@@ -74,7 +85,8 @@ module.exports = {
         }
 
         // Validate file size (e.g., 5MB max)
-        if (photo.size > 5 * 1024 * 1024) {
+        const fileSize = photo.size || 0;
+        if (fileSize > 5 * 1024 * 1024) {
           return res.status(400).json({ 
             success: false, 
             message: "Image too large. Maximum 5MB allowed" 
@@ -84,17 +96,26 @@ module.exports = {
         // Generate unique filename
         const timestamp = Date.now();
         const randomString = Math.random().toString(36).substring(7);
-        imagePath = `student_${timestamp}_${randomString}${extension}`;
+        profileImage = `student_${timestamp}_${randomString}${extension}`;
         
-        const destinationPath = path.join(
+        const uploadDir = path.join(
           __dirname, 
           "..", 
-          process.env.STUDENT_IMAGE_PATH, 
-          imagePath
+          process.env.STUDENT_IMAGE_PATH || 'uploads/students'
         );
+
+        // Create directory if it doesn't exist
+        if (!fsSync.existsSync(uploadDir)) {
+          await fs.mkdir(uploadDir, { recursive: true });
+        }
+        
+        const destinationPath = path.join(uploadDir, profileImage);
         
         // Copy file asynchronously
-        await fs.promises.copyFile(photo.filepath, destinationPath);
+        const sourcePath = photo.filepath || photo.path;
+        await fs.copyFile(sourcePath, destinationPath);
+        
+        console.log('Image uploaded successfully:', profileImage);
       }
 
       // Hash password asynchronously
@@ -102,23 +123,32 @@ module.exports = {
       const hashedPassword = await bcrypt.hash(password, salt);
 
       // Create new student with normalized email and username
-      const student = new Student({ 
+      const studentData = { 
         ...rest, 
         email: email.toLowerCase(), 
         username: username.toLowerCase(), 
         password: hashedPassword 
-      });
+      };
 
+      // Add profile image if uploaded
+      if (profileImage) {
+        studentData.profileImage = profileImage;
+      }
+
+      const student = new Student(studentData);
       const savedStudent = await student.save();
 
-      // Remove password from response for security
-      const responseData = savedStudent.toObject();
-      delete responseData.password;
+      // Populate references for response
+      const populatedStudent = await Student.findById(savedStudent._id)
+        .select('-password')
+        .populate('studentClass', 'className level')
+        .populate('schoolCampus', 'campus_name')
+        .populate('mentor', 'firstName lastName email');
 
       res.status(201).json({
         success: true,
         message: 'Student created successfully',
-        data: responseData
+        data: populatedStudent
       });
 
     } catch (error) {
@@ -133,9 +163,19 @@ module.exports = {
         });
       }
 
+      // Handle validation errors
+      if (error.name === 'ValidationError') {
+        const messages = Object.values(error.errors).map(err => err.message);
+        return res.status(400).json({ 
+          success: false, 
+          message: messages.join(', ') 
+        });
+      }
+
       res.status(500).json({ 
         success: false, 
-        message: 'Failed to create student. Please try again' 
+        message: 'Failed to create student. Please try again',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
   },
@@ -157,7 +197,7 @@ module.exports = {
         });
       }
 
-     // JWT_SECRET verification
+      // JWT_SECRET verification
       if (!JWT_SECRET) {
         console.error('JWT_SECRET is not defined in environment variables');
         return res.status(500).json({
@@ -167,7 +207,7 @@ module.exports = {
       }
 
       // Find student with password field
-        const student = await Student.findOne({ 
+      const student = await Student.findOne({ 
         email: email.toLowerCase() 
       }).select('+password');
 
@@ -196,7 +236,7 @@ module.exports = {
         });
       }
 
-     // Generating expiring token
+      // Generating expiring token
       const token = jwt.sign(
         { 
           id: student._id, 
@@ -217,6 +257,7 @@ module.exports = {
           email: student.email,
           username: student.username,
           phone: student.phone,
+          profileImage: student.profileImage,
           role: 'STUDENT'
         }
       });
@@ -252,13 +293,14 @@ module.exports = {
       if (classId) filter.studentClass = classId;
       if (status) filter.status = status;
       
-      // Search by name, email, or username
+      // Search by name, email, username, or phone
       if (search) {
         filter.$or = [
           { firstName: { $regex: search, $options: 'i' } },
           { lastName: { $regex: search, $options: 'i' } },
           { email: { $regex: search, $options: 'i' } },
-          { username: { $regex: search, $options: 'i' } }
+          { username: { $regex: search, $options: 'i' } },
+          { phone: { $regex: search, $options: 'i' } }
         ];
       }
 
@@ -269,7 +311,7 @@ module.exports = {
         .select('-password')
         .populate('studentClass', 'className level')
         .populate('mentor', 'firstName lastName email')
-        .populate('schoolCampus', 'campus_name')
+        .populate('schoolCampus', 'campus_name city')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit));
@@ -335,8 +377,8 @@ module.exports = {
 
       // Authorization: Students can only view their own profile
       // Staff (ADMIN, CAMPUS_MANAGER, TEACHER) can view any profile
-      const isOwner = req.user.id === id;
-      const isStaff = ['ADMIN', 'CAMPUS_MANAGER', 'TEACHER'].includes(req.user.role);
+      const isOwner = req.user?.id.toString() === id.toString();
+      const isStaff = ['ADMIN', 'CAMPUS_MANAGER', 'TEACHER'].includes(req.user?.role);
 
       if (!isOwner && !isStaff) {
         return res.status(403).json({ 
@@ -376,7 +418,15 @@ module.exports = {
   updateStudent: async (req, res) => {
     try {
       const { id } = req.params;
-      const updates = req.body;
+      
+      // Handle both JSON and FormData
+      const fields = req.fields || req.body;
+      const files = req.files || {};
+      
+      const updates = { ...fields };
+
+      console.log('Update fields:', updates);
+      console.log('Update files:', files);
 
       // Prevent password modification via this route (use dedicated route)
       delete updates.password;
@@ -393,7 +443,8 @@ module.exports = {
       // Check email uniqueness if email is being changed
       if (updates.email && updates.email.toLowerCase() !== student.email) {
         const emailExists = await Student.findOne({ 
-          email: updates.email.toLowerCase() 
+          email: updates.email.toLowerCase(),
+          _id: { $ne: id }
         });
         if (emailExists) {
           return res.status(409).json({ 
@@ -406,7 +457,8 @@ module.exports = {
       // Check username uniqueness if username is being changed
       if (updates.username && updates.username.toLowerCase() !== student.username) {
         const usernameExists = await Student.findOne({ 
-          username: updates.username.toLowerCase() 
+          username: updates.username.toLowerCase(),
+          _id: { $ne: id }
         });
         if (usernameExists) {
           return res.status(409).json({ 
@@ -416,54 +468,87 @@ module.exports = {
         }
       }
 
-
-       // Image handling
-      if (files.image?.[0]) {
-        const photo = files.image[0];
-        const extension = path.extname(photo.originalFilename).toLowerCase();
+      // Handle image upload
+      const imageFile = files.profileImage?.[0] || files.profileImage;
+      
+      if (imageFile) {
+        const photo = imageFile;
+        const extension = path.extname(photo.originalFilename || photo.name || '').toLowerCase();
         
-      // Image type validation
-      const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
-      if (!allowedExtensions.includes(extension)) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "Unauthorized image format" 
-        });
-      }
-
-      // Size validation (e.g., 5MB max)
-      if (photo.size > 5 * 1024 * 1024) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "Image too large (max 5MB)" 
-        });
-      }
-
-      const newFileName = `student_${id}_${Date.now()}${extension}`;
-      const newPath = path.join(__dirname, process.env.STUDENT_IMAGE_PATH, newFileName);
-
-      // Delete old image
-      if (student.student_image) {
-        const oldImagePath = path.join(__dirname, process.env.STUDENT_IMAGE_PATH, student.student_image);
-        if (fs.existsSync(oldImagePath)) {
-          fs.unlinkSync(oldImagePath);
+        // Image type validation
+        const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp'];
+        if (!allowedExtensions.includes(extension)) {
+          return res.status(400).json({ 
+            success: false, 
+            message: "Invalid image format. Only JPG, PNG, and WEBP allowed" 
+          });
         }
+
+        // Size validation (5MB max)
+        const fileSize = photo.size || 0;
+        if (fileSize > 5 * 1024 * 1024) {
+          return res.status(400).json({ 
+            success: false, 
+            message: "Image too large. Maximum 5MB allowed" 
+          });
+        }
+
+        const timestamp = Date.now();
+        const randomString = Math.random().toString(36).substring(7);
+        const newFileName = `student_${id}_${timestamp}_${randomString}${extension}`;
+        
+        const uploadDir = path.join(
+          __dirname, 
+          "..", 
+          process.env.STUDENT_IMAGE_PATH || 'uploads/students'
+        );
+
+        // Create directory if it doesn't exist
+        if (!fsSync.existsSync(uploadDir)) {
+          await fs.mkdir(uploadDir, { recursive: true });
+        }
+
+        const newPath = path.join(uploadDir, newFileName);
+
+        // Delete old image if exists
+        if (student.profileImage) {
+          const oldImagePath = path.join(uploadDir, student.profileImage);
+          try {
+            if (fsSync.existsSync(oldImagePath)) {
+              await fs.unlink(oldImagePath);
+              console.log('Old image deleted:', student.profileImage);
+            }
+          } catch (err) {
+            console.error('Error deleting old image:', err);
+          }
+        }
+
+        // Copy new image
+        const sourcePath = photo.filepath || photo.path;
+        await fs.copyFile(sourcePath, newPath);
+        updates.profileImage = newFileName;
+        
+        console.log('New image uploaded:', newFileName);
       }
 
-      fs.copyFileSync(photo.filepath, newPath);
-      student.student_image = newFileName;
-    }
+      // Normalize email and username
+      if (updates.email) {
+        updates.email = updates.email.toLowerCase();
+      }
+      if (updates.username) {
+        updates.username = updates.username.toLowerCase();
+      }
 
-      // Update student with normalized email and username
+      // Update student
       const updatedStudent = await Student.findByIdAndUpdate(
         id, 
-        { 
-          ...updates, 
-          email: updates.email?.toLowerCase(), 
-          username: updates.username?.toLowerCase() 
-        }, 
+        updates, 
         { new: true, runValidators: true }
-      ).select('-password');
+      )
+        .select('-password')
+        .populate('studentClass', 'className level')
+        .populate('schoolCampus', 'campus_name')
+        .populate('mentor', 'firstName lastName email');
 
       res.status(200).json({
         success: true,
@@ -483,9 +568,19 @@ module.exports = {
         });
       }
 
+      // Handle validation errors
+      if (error.name === 'ValidationError') {
+        const messages = Object.values(error.errors).map(err => err.message);
+        return res.status(400).json({ 
+          success: false, 
+          message: messages.join(', ') 
+        });
+      }
+
       res.status(500).json({ 
         success: false, 
-        message: 'Failed to update student' 
+        message: 'Failed to update student',
+        error: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
   },
@@ -517,8 +612,8 @@ module.exports = {
       }
 
       // Authorization: Only the student themselves or an ADMIN can change password
-      const isOwner = req.user.id === id;
-      const isAdmin = ['ADMIN', 'CAMPUS_MANAGER'].includes(req.body.role);
+      const isOwner = req.user?.id === id;
+      const isAdmin = ['ADMIN', 'CAMPUS_MANAGER'].includes(req.user?.role);
 
       if (!isOwner && !isAdmin) {
         return res.status(403).json({ 
@@ -639,6 +734,58 @@ module.exports = {
       res.status(500).json({ 
         success: false, 
         message: 'Failed to restore student' 
+      });
+    }
+  },
+
+  /**
+   * Permanently delete student
+   * @route   DELETE /api/students/:id/permanent
+   * @access  Private (ADMIN only)
+   */
+  deleteStudentPermanently: async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const student = await Student.findById(id);
+      if (!student) {
+        return res.status(404).json({ 
+          success: false, 
+          message: 'Student not found' 
+        });
+      }
+
+      // Delete profile image if exists
+      if (student.profileImage) {
+        const uploadDir = path.join(
+          __dirname, 
+          "..", 
+          process.env.STUDENT_IMAGE_PATH || 'uploads/students'
+        );
+        const imagePath = path.join(uploadDir, student.profileImage);
+        
+        try {
+          if (fsSync.existsSync(imagePath)) {
+            await fs.unlink(imagePath);
+          }
+        } catch (err) {
+          console.error('Error deleting image:', err);
+        }
+      }
+
+      // Delete student from database
+      await Student.findByIdAndDelete(id);
+
+      res.status(200).json({
+        success: true,
+        message: 'Student deleted permanently'
+      });
+
+    } catch (error) {
+      console.error('Error deleting student:', error);
+      res.status(500).json({ 
+        success: false, 
+        message: 'Failed to delete student' 
       });
     }
   }

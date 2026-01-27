@@ -28,7 +28,6 @@ const levelSchema = new mongoose.Schema(
       type: String,
       enum: ["LANGUAGE", "ACADEMIC", "PROFESSIONAL"],
       default: "LANGUAGE",
-      index: true,
     },
 
     // Order for sorting (A1=1, A2=2, B1=3...)
@@ -58,6 +57,6 @@ const levelSchema = new mongoose.Schema(
 );
 
 // Avoid duplicates by type + code
-levelSchema.index({ code: 1, type: 1 }, { unique: true });
+levelSchema.index({ code: 1, type: 1}, { unique: true });
 
 module.exports = mongoose.model("Level", levelSchema);

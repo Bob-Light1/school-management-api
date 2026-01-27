@@ -1,5 +1,5 @@
 const express = require("express");
-const authMiddleware = require('../middleware/auth/auth');
+const { authenticate, authorize } = require('../middleware/auth/auth');
 const {
     createClass,
     getAllClass,
@@ -21,34 +21,69 @@ const router = express.Router();
 const staffRoles = ['CAMPUS_MANAGER', 'DIRECTOR', 'TEACHER'];
 const adminRoles = ['CAMPUS_MANAGER', 'DIRECTOR'];
 
+// Apply authentication to all routes
+router.use(authenticate);
+
 // --- GENERAL CREATION AND READING ROUTES ---
 
-// Create a new class
-router.post("/", authMiddleware(adminRoles), createClass);
+/**
+ * @route   POST /api/class
+ * @desc    Create a new class
+ * @access  CAMPUS_MANAGER, DIRECTOR
+ */
+router.post("/", authorize(adminRoles), createClass);
 
-// Get all classes (with filters and pagination)
-router.get("/", authMiddleware(staffRoles), getAllClass);
+/**
+ * @route   GET /api/class
+ * @desc    Get all classes (with filters and pagination)
+ * @access  CAMPUS_MANAGER, DIRECTOR, TEACHER
+ */
+router.get("/", authorize(staffRoles), getAllClass);
 
 // --- SPECIFIC SEARCH ROUTES ---
 
-// Get a class by its unique ID
-router.get("/single/:id", authMiddleware(staffRoles), getClassById);
+/**
+ * @route   GET /api/class/single/:id
+ * @desc    Get a class by its unique ID
+ * @access  CAMPUS_MANAGER, DIRECTOR, TEACHER
+ */
+router.get("/single/:id", authorize(staffRoles), getClassById);
 
-// Get classes from a specific campus
-router.get("/campus/:campusId", authMiddleware(staffRoles), getClassesByCampus);
+/**
+ * @route   GET /api/class/campus/:campusId
+ * @desc    Get classes from a specific campus
+ * @access  CAMPUS_MANAGER, DIRECTOR, TEACHER
+ */
+router.get("/campus/:campusId", authorize(staffRoles), getClassesByCampus);
 
-// Get classes managed by a specific teacher
-router.get("/teacher/:teacherId", authMiddleware(staffRoles), getClassesByTeacher);
+/**
+ * @route   GET /api/class/teacher/:teacherId
+ * @desc    Get classes managed by a specific teacher
+ * @access  CAMPUS_MANAGER, DIRECTOR, TEACHER
+ */
+router.get("/teacher/:teacherId", authorize(staffRoles), getClassesByTeacher);
 
 // --- MODIFICATION AND DELETION ROUTES ---
 
-// Update class information
-router.put("/:id", authMiddleware(adminRoles), updateClass);
+/**
+ * @route   PUT /api/class/:id
+ * @desc    Update class information
+ * @access  CAMPUS_MANAGER, DIRECTOR
+ */
+router.put("/:id", authorize(adminRoles), updateClass);
 
-// Archive a class (Soft Delete)
-router.delete("/:id", authMiddleware(adminRoles), deleteClass);
+/**
+ * @route   DELETE /api/class/:id
+ * @desc    Archive a class (Soft Delete)
+ * @access  CAMPUS_MANAGER, DIRECTOR
+ */
+router.delete("/:id", authorize(adminRoles), deleteClass);
 
-// Restore an archived class
-router.patch("/:id/restore", authMiddleware(adminRoles), restoreClass);
+/**
+ * @route   PATCH /api/class/:id/restore
+ * @desc    Restore an archived class
+ * @access  CAMPUS_MANAGER, DIRECTOR
+ */
+router.patch("/:id/restore", authorize(adminRoles), restoreClass);
 
 module.exports = router;

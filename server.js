@@ -4,6 +4,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
 const { apiLimiter } = require('./middleware/rate-limiter/rate-limiter');
+const path = require('path');
 
 const app = express();
 
@@ -24,6 +25,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// SERVE STATIC FILES (Images des étudiants)
+// Permet d'accéder aux images via http://localhost:5000/uploads/students/nom_image.jpg
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 // Trust proxy (important for rate limiting)
 app.set('trust proxy', 1);
 
@@ -31,9 +36,9 @@ app.set('trust proxy', 1);
 const campusRouter = require("./routers/campus.router");
 const classRouter = require("./routers/class.router");
 const levelRouter = require("./routers/level.router");
-const teacherRouter = require("./routers/teacher.router");
 const subjectRouter = require("./routers/subject.router");
 const studentRouter = require("./routers/student.router");
+const adminRouter = require("./routers/admin.router");
 
 // MONGODB CONNECTION
 mongoose
@@ -52,9 +57,9 @@ app.use('/api/', apiLimiter);
 app.use("/api/campus", campusRouter);
 app.use("/api/class", classRouter);
 app.use('/api/level', levelRouter);
-app.use('/api/teacher', teacherRouter);
 app.use('/api/subject', subjectRouter);
 app.use('/api/student', studentRouter);
+app.use('/api/admin', adminRouter);
 
 // Error handler
 app.use((err, req, res, next) => {
