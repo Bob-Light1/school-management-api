@@ -18,8 +18,8 @@ const router = express.Router();
  * Authorized roles for modification: CAMPUS_MANAGER, DIRECTOR
  */
 
-const staffRoles = ['CAMPUS_MANAGER', 'DIRECTOR', 'TEACHER'];
-const adminRoles = ['CAMPUS_MANAGER', 'DIRECTOR'];
+const staffRoles = ['CAMPUS_MANAGER', 'DIRECTOR', 'TEACHER', 'ADMIN'];
+const adminRoles = ['CAMPUS_MANAGER', 'DIRECTOR', 'ADMIN'];
 
 // Apply authentication to all routes
 router.use(authenticate);

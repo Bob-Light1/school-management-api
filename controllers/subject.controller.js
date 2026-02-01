@@ -1,7 +1,23 @@
 const Subject = require('../models/subject.model');
+const Campus = require('../models/campus.model');
+const {
+  sendSuccess,
+  sendError,
+  sendCreated,
+  sendNotFound,
+  sendConflict,
+  sendPaginated,
+  handleDuplicateKeyError
+} = require('../utils/responseHelpers');
+const {
+  isValidObjectId,
+  buildCampusFilter
+} = require('../utils/validationHelpers');
 
 /**
- * Create a new subject
+ * @desc    Create a new subject
+ * @route   POST /api/subject
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
 exports.createSubject = async (req, res) => {
   try {
@@ -12,262 +28,354 @@ exports.createSubject = async (req, res) => {
       description,
       coefficient,
       color,
+      category
     } = req.body;
 
-    const subject = await Subject.create({
+    // Validate required fields
+    if (!schoolCampus || !subject_name || !subject_code) {
+      return sendError(res, 400, 'Campus, subject name, and subject code are required');
+    }
+
+    // Validate ObjectId
+    if (!isValidObjectId(schoolCampus)) {
+      return sendError(res, 400, 'Invalid campus ID format');
+    }
+
+    // Campus isolation enforcement : CAMPUS_MANAGER can only create subjects in their own campus
+    if (req.user.role === 'CAMPUS_MANAGER') {
+      if (req.user.campusId !== schoolCampus) {
+        return sendError(res, 403, 'You can only create subjects in your own campus');
+      }
+    }
+
+    // Check for duplicate subject code in the same campus
+    const existingSubject = await Subject.findOne({
       schoolCampus,
+      subject_code: subject_code.toUpperCase().trim()
+    });
+
+    if (existingSubject) {
+      return sendConflict(res, 'A subject with this code already exists in this campus');
+    }
+
+    // Create the subject
+    const newSubject = await Subject.create({
+      schoolCampus,
+      subject_name: subject_name.trim(),
+      subject_code: subject_code.toUpperCase().trim(),
+      description,
+      coefficient: coefficient || 1,
+      color: color || '#1976d2',
+      category: category || 'Other'
+    });
+
+    // Populate for response
+    const populatedSubject = await Subject.findById(newSubject._id)
+      .populate('schoolCampus', 'campus_name')
+      .lean();
+
+    return sendCreated(res, 'Subject created successfully', populatedSubject);
+
+  } catch (error) {
+    console.error('❌ createSubject error:', error);
+
+    // Handle duplicate key errors
+    if (error.code === 11000) {
+      return sendConflict(res, 'Subject code already exists for this campus');
+    }
+
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return sendError(res, 400, 'Validation failed', { errors: messages });
+    }
+
+    return sendError(res, 500, 'Failed to create subject');
+  }
+};
+
+/**
+ * @desc    Get all subjects with filters and pagination
+ * @route   GET /api/subject
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER, TEACHER
+ */
+exports.getSubjects = async (req, res) => {
+  try {
+    const {
+      campusId,
+      isActive = 'true',
+      category,
+      search,
+      page = 1,
+      limit = 50,
+      includeArchived,
+    } = req.query;
+
+    // Build campus filter based on user role
+    const filter = buildCampusFilter(req.user, campusId, );
+
+    // Active/Inactive filter
+    const showActive = isActive === 'true' || isActive === true || isActive === '1';
+
+    if (includeArchived !== 'true') {
+      filter.isActive = showActive;
+    }
+    
+
+    // Category filter
+    if (category) {
+      filter.category = category;
+    }
+
+    // Search by name or code
+    if (search) {
+      filter.$or = [
+        { subject_name: { $regex: search, $options: 'i' } },
+        { subject_code: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = Math.min(parseInt(limit, 10) || 50, 100); // Max 100
+    const skip = (pageNum - 1) * limitNum;
+
+    // Fetch subjects
+    const subjects = await Subject.find(filter)
+      .sort({ subject_name: 1 })
+      .skip(skip)
+      .limit(limitNum)
+      .populate('schoolCampus', 'campus_name')
+      .lean();
+
+    const total = await Subject.countDocuments(filter);
+
+    return sendPaginated(
+      res,
+      200,
+      'Subjects retrieved successfully',
+      subjects,
+      { total, page: pageNum, limit: limitNum }
+    );
+
+  } catch (error) {
+    console.error('❌ getSubjects error:', error);
+    return sendError(res, 500, 'Failed to retrieve subjects');
+  }
+};
+
+/**
+ * @desc    Get subject by ID
+ * @route   GET /api/subject/:id
+ * @access  ADMIN, DIRECTOR,          
+ */
+exports.getSubjectById = async (req, res) => {
+  try {
+    const subjectId = req.params.id;
+
+    // Validate ObjectId
+    if (!isValidObjectId(subjectId)) {
+      return sendError(res, 400, 'Invalid subject ID format');
+    }
+
+    // Find subject
+    const subject = await Subject.findById(subjectId)
+      .populate('schoolCampus', 'campus_name location')
+      .lean();
+
+    if (!subject) {
+      return sendNotFound(res, 'Subject');
+    }
+
+    // Campus isolation check
+    if (req.user.role === 'CAMPUS_MANAGER') {
+      if (subject.schoolCampus._id.toString() !== req.user.campusId) {
+        return sendError(res, 403, 'You can only access subjects from your own campus');
+      }
+    }
+
+    return sendSuccess(res, 200, 'Subject retrieved successfully', subject);
+
+  } catch (error) {
+    console.error('❌ getSubjectById error:', error);
+    return sendError(res, 500, 'Failed to retrieve subject');
+  }
+};
+
+/**
+ * @desc    Update subject
+ * @route   PUT /api/subject/:id
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+exports.updateSubject = async (req, res) => {
+  try {
+    const subjectId = req.params.id;
+
+    // Validate ObjectId
+    if (!isValidObjectId(subjectId)) {
+      return sendError(res, 400, 'Invalid subject ID format');
+    }
+
+    // Find existing subject
+    const existingSubject = await Subject.findById(subjectId);
+
+    if (!existingSubject) {
+      return sendNotFound(res, 'Subject');
+    }
+
+    // Campus isolation check
+    if (req.user.role === 'CAMPUS_MANAGER') {
+      if (existingSubject.schoolCampus.toString() !== req.user.campusId) {
+        return sendError(res, 403, 'You can only update subjects from your own campus');
+      }
+    }
+
+    const {
       subject_name,
       subject_code,
       description,
       coefficient,
       color,
-    });
+      category
+    } = req.body;
 
-    return res.status(201).json({
-      success: true,
-      message: 'Subject created successfully',
-      data: subject,
-    });
-  } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'Subject code already exists for this campus',
+    // Check for duplicate subject code (if being changed)
+    if (subject_code && subject_code.toUpperCase() !== existingSubject.subject_code) {
+      const duplicateSubject = await Subject.findOne({
+        _id: { $ne: subjectId },
+        schoolCampus: existingSubject.schoolCampus,
+        subject_code: subject_code.toUpperCase().trim()
       });
-    }
 
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create subject',
-      error: error.message,
-    });
-  }
-};
-
-/**
- * Get all subjects (by campus)
- */
-
-exports.getSubjects = async (req, res) => {
-  try {
-    // ─── Sécurité & droits d'accès ──────────────────────────────
-    const user = req.user; // fourni par authMiddleware
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Utilisateur non authentifié',
-      });
-    }
-
-    // Selon le rôle, limiter les campus visibles
-    let allowedCampusIds = [];
-    if (user.role === 'CAMPUS_MANAGER') {
-      if (!user.campusId) {
-        return res.status(403).json({
-          success: false,
-          message: 'Aucun campus associé à cet utilisateur',
-        });
+      if (duplicateSubject) {
+        return sendConflict(res, 'Another subject with this code already exists in this campus');
       }
-      allowedCampusIds = [user.campusId];
-    } else if (user.role === 'TEACHER') {
-      // Si teacher, on pourrait limiter aux campus où il enseigne
-      // (à implémenter selon ta logique)
-      allowedCampusIds = [user.campusId]; // exemple
-    }
-    // DIRECTOR ou ADMIN voit tout → allowedCampusIds reste vide
-
-    // ─── Paramètres de requête ───────────────────────────────────
-    const {
-      campusId,
-      isActive = 'true',        // par défaut on montre les actifs
-      page = 1,
-      limit = 50,
-      search,
-    } = req.query;
-
-    // Convertir proprement isActive (string → boolean)
-    const showActive = isActive === 'true' || isActive === true || isActive === '1';
-
-    // Construire le filtre
-    const filter = {};
-
-    // Filtre campus (sécurisé)
-    if (allowedCampusIds.length > 0) {
-      filter.schoolCampus = { $in: allowedCampusIds };
-    } else if (campusId) {
-      filter.schoolCampus = campusId;
     }
 
-    // Filtre actif/inactif
-    filter.isActive = showActive;
+    // Update fields
+    if (subject_name) existingSubject.subject_name = subject_name.trim();
+    if (subject_code) existingSubject.subject_code = subject_code.toUpperCase().trim();
+    if (description !== undefined) existingSubject.description = description;
+    if (coefficient !== undefined) existingSubject.coefficient = coefficient;
+    if (color) existingSubject.color = color;
+    if (category) existingSubject.category = category;
 
-    // Recherche texte (optionnel)
-    if (search) {
-      filter.$or = [
-        { subject_name: { $regex: search, $options: 'i' } },
-        { subject_code: { $regex: search, $options: 'i' } },
-      ];
-    }
+    // Save
+    const updatedSubject = await existingSubject.save();
 
-    // ─── Pagination ──────────────────────────────────────────────
-    const pageNum = parseInt(page, 10) || 1;
-    const limitNum = Math.min(parseInt(limit, 10) || 50, 100); // max 100
-    const skip = (pageNum - 1) * limitNum;
+    // Populate for response
+    const populatedSubject = await Subject.findById(updatedSubject._id)
+      .populate('schoolCampus', 'campus_name')
+      .lean();
 
-    // ─── Requête ─────────────────────────────────────────────────
-    const subjects = await Subject.find(filter)
-      .sort({ subject_name: 1 })
-      .skip(skip)
-      .limit(limitNum)
-      .populate('schoolCampus', 'campus_name code location') // plus de champs si besoin
-      .lean(); // plus rapide si pas besoin des méthodes mongoose
-
-    const total = await Subject.countDocuments(filter);
-
-    // Réponse structurée et paginée
-    return res.status(200).json({
-      success: true,
-      data: subjects,
-      pagination: {
-        total,
-        page: pageNum,
-        limit: limitNum,
-        pages: Math.ceil(total / limitNum),
-        hasNext: pageNum * limitNum < total,
-        hasPrev: pageNum > 1,
-      },
-    });
+    return sendSuccess(res, 200, 'Subject updated successfully', populatedSubject);
 
   } catch (error) {
-    console.error('Erreur getSubjects:', error);
+    console.error('❌ updateSubject error:', error);
 
-    // Ne jamais exposer error.message en prod
-    return res.status(500).json({
-      success: false,
-      message: 'Erreur lors de la récupération des matières',
-      // error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-    });
+    if (error.code === 11000) {
+      return handleDuplicateKeyError(res, error);
+    }
+
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return sendError(res, 400, 'Validation failed', { errors: messages });
+    }
+
+    return sendError(res, 500, 'Failed to update subject');
   }
 };
 
 /**
- * Get subject by ID
- */
-exports.getSubjectById = async (req, res) => {
-  try {
-    const subject = await Subject.findById(req.params.id)
-      .populate('schoolCampus', 'campus_name');
-
-    if (!subject) {
-      return res.status(404).json({
-        success: false,
-        message: 'Subject not found',
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      data: subject,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch subject',
-      error: error.message,
-    });
-  }
-};
-
-/**
- * Update subject
- */
-exports.updateSubject = async (req, res) => {
-  try {
-    const updatedSubject = await Subject.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    );
-
-    if (!updatedSubject) {
-      return res.status(404).json({
-        success: false,
-        message: 'Subject not found',
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: 'Subject updated successfully',
-      data: updatedSubject,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update subject',
-      error: error.message,
-    });
-  }
-};
-
-/**
- * Soft delete (archive) subject
+ * @desc    Archive subject (soft delete)
+ * @route   DELETE /api/subject/:id
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
 exports.deleteSubject = async (req, res) => {
   try {
-    const subject = await Subject.findByIdAndUpdate(
-      req.params.id,
-      { isActive: false },
-      { new: true }
-    );
+    const subjectId = req.params.id;
 
-    if (!subject) {
-      return res.status(404).json({
-        success: false,
-        message: 'Subject not found',
-      });
+    // Validate ObjectId
+    if (!isValidObjectId(subjectId)) {
+      return sendError(res, 400, 'Invalid subject ID format');
     }
 
-    return res.status(200).json({
-      success: true,
-      message: 'Subject archived successfully',
-    });
+    // Find subject
+    const subject = await Subject.findById(subjectId);
+
+    if (!subject) {
+      return sendNotFound(res, 'Subject');
+    }
+
+    // Campus isolation check
+    if (req.user.role === 'CAMPUS_MANAGER') {
+      if (subject.schoolCampus.toString() !== req.user.campusId) {
+        return sendError(res, 403, 'You can only archive subjects from your own campus');
+      }
+    }
+
+    // Check if already archived
+    if (!subject.isActive) {
+      return sendError(res, 400, 'Subject is already archived');
+    }
+
+    // Archive
+    subject.isActive = false;
+    await subject.save();
+
+    return sendSuccess(res, 200, 'Subject archived successfully');
+
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete subject',
-      error: error.message,
-    });
+    console.error('❌ deleteSubject error:', error);
+    return sendError(res, 500, 'Failed to archive subject');
   }
 };
 
 /**
- * Restore archived subject
+ * @desc    Restore archived subject
+ * @route   PATCH /api/subject/:id/restore
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
 exports.restoreSubject = async (req, res) => {
   try {
-    const subject = await Subject.findByIdAndUpdate(
-      req.params.id,
-      { isActive: true },
-      { new: true }
-    );
+    const subjectId = req.params.id;
 
-    if (!subject) {
-      return res.status(404).json({
-        success: false,
-        message: 'Subject not found',
-      });
+    // Validate ObjectId
+    if (!isValidObjectId(subjectId)) {
+      return sendError(res, 400, 'Invalid subject ID format');
     }
 
-    return res.status(200).json({
-      success: true,
-      message: 'Subject restored successfully',
-    });
+    // Find subject
+    const subject = await Subject.findById(subjectId);
+
+    if (!subject) {
+      return sendNotFound(res, 'Subject');
+    }
+
+    // Campus isolation check
+    if (req.user.role === 'CAMPUS_MANAGER') {
+      if (subject.schoolCampus.toString() !== req.user.campusId) {
+        return sendError(res, 403, 'You can only restore subjects from your own campus');
+      }
+    }
+
+    // Check if not archived
+    if (subject.isActive) {
+      return sendError(res, 400, 'Subject is already active');
+    }
+
+    // Restore
+    subject.isActive = true;
+    await subject.save();
+
+    // Populate for response
+    const populatedSubject = await Subject.findById(subject._id)
+      .populate('schoolCampus', 'campus_name')
+      .lean();
+
+    return sendSuccess(res, 200, 'Subject restored successfully', populatedSubject);
+
   } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to restore subject',
-      error: error.message,
-    });
+    console.error('❌ restoreSubject error:', error);
+    return sendError(res, 500, 'Failed to restore subject');
   }
 };

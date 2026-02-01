@@ -1,9 +1,29 @@
 require('dotenv').config();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 
 const Teacher = require('../models/teacher.model');
+const Campus = require('../models/campus.model');
+
 const { uploadImage, deleteFile, replaceFile } = require('../utils/fileUpload');
+const {
+  sendSuccess,
+  sendError,
+  sendPaginated,
+  sendCreated,
+  sendNotFound,
+  sendConflict,
+  handleDuplicateKeyError
+} = require('../utils/responseHelpers');
+const {
+  isValidObjectId,
+  isValidEmail,
+  validatePasswordStrength,
+  validateMultipleClassesBelongToCampus,
+  checkCampusCapacity,
+  buildCampusFilter
+} = require('../utils/validationHelpers');
 
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -18,65 +38,103 @@ module.exports = {
    * @access  Private (ADMIN, CAMPUS_MANAGER, DIRECTOR)
    */
   createTeacher: async (req, res) => {
+    // Start transaction for data consistency
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
     try {
       // Handle both JSON and FormData
       const fields = req.fields || req.body;
       const files = req.files || {};
 
-      const { email, username, password, ...rest } = fields;
+      const { email, username, password, classes, ...rest } = fields;
 
       // Validate required fields
       if (!email || !password) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Email and password are required' 
-        });
+        await session.abortTransaction();
+        return sendError(res, 400, 'Email and password are required');
       }
 
       // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Invalid email format' 
-        });
+      if (!isValidEmail(email)) {
+        await session.abortTransaction();
+        return sendError(res, 400, 'Invalid email format');
       }
 
       // Validate password strength
-      if (password.length < 8) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Password must be at least 8 characters long' 
+      const passwordValidation = validatePasswordStrength(password);
+      if (!passwordValidation.valid) {
+        await session.abortTransaction();
+        return sendError(res, 400, 'Password does not meet requirements', {
+          errors: passwordValidation.errors
         });
       }
 
       // Check email uniqueness
       const existingEmail = await Teacher.findOne({ 
         email: email.toLowerCase().trim() 
-      });
+      }).session(session);
       
       if (existingEmail) {
-        return res.status(409).json({ 
-          success: false, 
-          message: 'A teacher with this email is already registered' 
-        });
+        await session.abortTransaction();
+        return sendConflict(res, 'A teacher with this email is already registered');
       }
 
       // Check username uniqueness if provided
       if (username) {
         const existingUser = await Teacher.findOne({ 
           username: username.toLowerCase().trim() 
-        });
+        }).session(session);
         
         if (existingUser) {
-          return res.status(409).json({ 
-            success: false, 
-            message: 'This username is already taken' 
-          });
+          await session.abortTransaction();
+          return sendConflict(res, 'This username is already taken');
         }
       }
 
-      // Handle image upload using utility
+      // Determine campus based on user role (CRITICAL for security)
+      let campusId;
+      if (req.user.role === 'CAMPUS_MANAGER') {
+        // Manager can only create teachers in their own campus
+        campusId = req.user.campusId;
+      } else if (req.user.role === 'ADMIN' || req.user.role === 'DIRECTOR') {
+        // Admin/Director must provide campus
+        if (!fields.schoolCampus) {
+          await session.abortTransaction();
+          return sendError(res, 400, 'Campus ID is required for Admins');
+        }
+        campusId = fields.schoolCampus;
+      } else {
+        await session.abortTransaction();
+        return sendError(res, 403, 'You are not authorized to create teachers');
+      }
+
+      // Validate campus exists
+      const campus = await Campus.findById(campusId).session(session);
+      if (!campus) {
+        await session.abortTransaction();
+        return sendNotFound(res, 'Campus');
+      }
+
+      // Check campus capacity
+      const capacity = await checkCampusCapacity(campusId, 'teachers');
+      if (!capacity.canAdd) {
+        await session.abortTransaction();
+        return sendError(res, 400, 
+          `Campus has reached maximum teacher capacity (${capacity.max}). Current: ${capacity.current}`
+        );
+      }
+
+      // Validate classes belong to campus (if provided)
+      if (classes && Array.isArray(classes) && classes.length > 0) {
+        const validation = await validateMultipleClassesBelongToCampus(classes, campusId);
+        if (!validation.valid) {
+          await session.abortTransaction();
+          return sendError(res, 400, 'Some assigned classes do not belong to this campus');
+        }
+      }
+
+      // Handle image upload
       let teacher_image = null;
       const imageFile = files.teacher_image?.[0] || files.teacher_image || files.image?.[0] || files.image;
       
@@ -84,10 +142,8 @@ module.exports = {
         try {
           teacher_image = await uploadImage(imageFile, TEACHER_FOLDER, 'teacher');
         } catch (uploadError) {
-          return res.status(400).json({ 
-            success: false, 
-            message: uploadError.message 
-          });
+          await session.abortTransaction();
+          return sendError(res, 400, uploadError.message);
         }
       }
 
@@ -95,61 +151,50 @@ module.exports = {
       const salt = await bcrypt.genSalt(SALT_ROUNDS);
       const hashedPassword = await bcrypt.hash(password, salt);
 
-      // Create new teacher with normalized data
+      // Create teacher data
       const teacherData = { 
         ...rest, 
         email: email.toLowerCase().trim(), 
         username: username ? username.toLowerCase().trim() : undefined,
-        password: hashedPassword 
+        password: hashedPassword,
+        schoolCampus: campusId,
+        classes: classes || [],
+        teacher_image
       };
 
-      // Add teacher image if uploaded
-      if (teacher_image) {
-        teacherData.teacher_image = teacher_image;
-      }
-
       const teacher = new Teacher(teacherData);
-      const savedTeacher = await teacher.save();
+      const savedTeacher = await teacher.save({ session });
+
+      // Commit transaction
+      await session.commitTransaction();
 
       // Populate references for response
       const populatedTeacher = await Teacher.findById(savedTeacher._id)
         .select('-password -salary')
         .populate('schoolCampus', 'campus_name')
         .populate('subjects', 'subjectName')
-        .populate('classes', 'className');
+        .populate('classes', 'className')
+        .lean();
 
-      res.status(201).json({
-        success: true,
-        message: 'Teacher created successfully',
-        data: populatedTeacher
-      });
+      return sendCreated(res, 'Teacher created successfully', populatedTeacher);
 
     } catch (error) {
+      // Rollback transaction on error
+      await session.abortTransaction();
       console.error('❌ Error creating teacher:', error);
       
-      // Handle MongoDB duplicate key errors
       if (error.code === 11000) {
-        const field = Object.keys(error.keyPattern)[0];
-        return res.status(409).json({ 
-          success: false, 
-          message: `This ${field} is already registered` 
-        });
+        return handleDuplicateKeyError(res, error);
       }
 
-      // Handle validation errors
       if (error.name === 'ValidationError') {
         const messages = Object.values(error.errors).map(err => err.message);
-        return res.status(400).json({ 
-          success: false, 
-          message: messages.join(', ') 
-        });
+        return sendError(res, 400, 'Validation failed', { errors: messages });
       }
 
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to create teacher. Please try again',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
+      return sendError(res, 500, 'Failed to create teacher. Please try again');
+    } finally {
+      session.endSession();
     }
   },
 
@@ -164,19 +209,18 @@ module.exports = {
 
       // Validate required fields
       if (!email || !password) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Email and password are required' 
-        });
+        return sendError(res, 400, 'Email and password are required');
       }
 
       // JWT_SECRET verification
       if (!JWT_SECRET) {
-        console.error('❌ JWT_SECRET is not defined in environment variables');
-        return res.status(500).json({
-          success: false,
-          message: "Server configuration error"
-        });
+        console.error('❌ JWT_SECRET is not defined');
+        return sendError(res, 500, 'Server configuration error');
+      }
+
+      // Validate email format
+      if (!isValidEmail(email)) {
+        return sendError(res, 400, 'Invalid email format');
       }
 
       // Find teacher with password field
@@ -184,29 +228,20 @@ module.exports = {
         email: email.toLowerCase().trim() 
       }).select('+password');
 
-      // Generic error message for security
+      // Generic error for security
       if (!teacher) {
-        return res.status(401).json({ 
-          success: false, 
-          message: 'Invalid email or password' 
-        });
+        return sendError(res, 401, 'Invalid email or password');
       }
 
       // Compare password
       const isPasswordValid = await bcrypt.compare(password, teacher.password);
       if (!isPasswordValid) {
-        return res.status(401).json({ 
-          success: false, 
-          message: 'Invalid email or password' 
-        });
+        return sendError(res, 401, 'Invalid email or password');
       }
 
       // Check account status
       if (teacher.status !== 'active') {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'Account is inactive or suspended. Please contact support' 
-        });
+        return sendError(res, 403, 'Account is inactive or suspended. Please contact support');
       }
 
       // Generate JWT token
@@ -229,9 +264,7 @@ module.exports = {
       teacher.lastLogin = new Date();
       await teacher.save();
 
-      res.status(200).json({
-        success: true,
-        message: 'Login successful',
+      return sendSuccess(res, 200, 'Login successful', {
         token,
         user: {
           id: teacher._id,
@@ -247,10 +280,7 @@ module.exports = {
 
     } catch (error) {
       console.error('❌ Teacher login error:', error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Internal server error during login' 
-      });
+      return sendError(res, 500, 'Internal server error during login');
     }
   },
 
@@ -258,6 +288,8 @@ module.exports = {
    * Get all teachers with filters and pagination
    * @route   GET /api/teacher
    * @access  Private (ADMIN, CAMPUS_MANAGER, DIRECTOR)
+   * 
+   * 🔥 CRITICAL SECURITY FIX: Campus isolation enforced
    */
   getAllTeachers: async (req, res) => {
     try {
@@ -271,14 +303,16 @@ module.exports = {
         page = 1 
       } = req.query;
       
-      // Build filter object
-      const filter = {};
-      if (campusId) filter.schoolCampus = campusId;
+      // 🔥 CRITICAL: Build campus filter based on user role
+      // This was the MAJOR SECURITY FLAW in the original code
+      const filter = buildCampusFilter(req.user, campusId);
+      
+      // Additional filters
       if (status) filter.status = status;
       if (gender) filter.gender = gender;
       if (employmentType) filter.employmentType = employmentType;
       
-      // Search by name, email, username, or phone
+      // Search by name, email, username, phone, or qualification
       if (search) {
         filter.$or = [
           { firstName: { $regex: search, $options: 'i' } },
@@ -295,33 +329,27 @@ module.exports = {
       // Fetch teachers with populated references
       const teachers = await Teacher.find(filter)
         .select('-password -salary')
-        .populate('schoolCampus', 'campus_name city')
+        .populate('schoolCampus', 'campus_name location.city')
         .populate('subjects', 'subjectName')
         .populate('classes', 'className')
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(Number(limit));
+        .limit(Number(limit))
+        .lean();
 
       const total = await Teacher.countDocuments(filter);
 
-      res.status(200).json({
-        success: true,
-        message: 'Teachers retrieved successfully',
-        pagination: { 
-          total, 
-          page: Number(page), 
-          limit: Number(limit), 
-          pages: Math.ceil(total / Number(limit)) 
-        },
-        data: teachers
-      });
+      return sendPaginated(
+        res,
+        200,
+        'Teachers retrieved successfully',
+        teachers,
+        { total, page, limit }
+      );
 
     } catch (error) {
       console.error('❌ Error fetching teachers:', error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to retrieve teachers' 
-      });
+      return sendError(res, 500, 'Failed to retrieve teachers');
     }
   },
 
@@ -334,27 +362,22 @@ module.exports = {
     try {
       const { id } = req.params;
 
-      // Validate MongoDB ObjectId format
-      if (!id.match(/^[0-9a-fA-F]{24}$/)) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Invalid teacher ID format' 
-        });
+      // Validate ObjectId format
+      if (!isValidObjectId(id)) {
+        return sendError(res, 400, 'Invalid teacher ID format');
       }
 
       // Fetch teacher with populated references
       const teacher = await Teacher.findById(id)
         .select('-password -salary')
-        .populate('schoolCampus', 'campus_name city')
+        .populate('schoolCampus', 'campus_name location')
         .populate('subjects', 'subjectName')
-        .populate('classes', 'className level');
+        .populate('classes', 'className level')
+        .lean();
 
       // Check if teacher exists
       if (!teacher) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Teacher not found' 
-        });
+        return sendNotFound(res, 'Teacher');
       }
 
       // Authorization check
@@ -362,31 +385,21 @@ module.exports = {
       const isStaff = ['ADMIN', 'CAMPUS_MANAGER', 'DIRECTOR'].includes(req.user?.role);
 
       if (!isOwner && !isStaff) {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'You are not authorized to view this profile' 
-        });
+        return sendError(res, 403, 'You are not authorized to view this profile');
       }
 
-      res.status(200).json({
-        success: true,
-        data: teacher
-      });
+      // Additional campus check for CAMPUS_MANAGER
+      if (req.user.role === 'CAMPUS_MANAGER') {
+        if (teacher.schoolCampus._id.toString() !== req.user.campusId) {
+          return sendError(res, 403, 'This teacher does not belong to your campus');
+        }
+      }
+
+      return sendSuccess(res, 200, 'Teacher retrieved successfully', teacher);
 
     } catch (error) {
       console.error('❌ Error fetching teacher:', error);
-      
-      if (error.kind === 'ObjectId') {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Invalid teacher ID format' 
-        });
-      }
-
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to retrieve teacher details' 
-      });
+      return sendError(res, 500, 'Failed to retrieve teacher details');
     }
   },
 
@@ -399,62 +412,78 @@ module.exports = {
     try {
       const { id } = req.params;
       
+      // Validate ObjectId
+      if (!isValidObjectId(id)) {
+        return sendError(res, 400, 'Invalid teacher ID format');
+      }
+
       // Handle both JSON and FormData
       const fields = req.fields || req.body;
       const files = req.files || {};
       
       const updates = { ...fields };
 
-      // Validate ObjectId
-      if (!id.match(/^[0-9a-fA-F]{24}$/)) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Invalid teacher ID format' 
-        });
-      }
-
-      // Prevent password and salary modification via this route
+      // Prevent password, salary, and campus modification via this route
       delete updates.password;
       delete updates.salary;
+      delete updates.schoolCampus; // Campus cannot be changed
 
       // Check if teacher exists
       const teacher = await Teacher.findById(id);
       if (!teacher) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Teacher not found' 
-        });
+        return sendNotFound(res, 'Teacher');
       }
 
-      // Check email uniqueness if email is being changed
+      // Authorization: CAMPUS_MANAGER can only update teachers in their campus
+      if (req.user.role === 'CAMPUS_MANAGER') {
+        if (teacher.schoolCampus.toString() !== req.user.campusId) {
+          return sendError(res, 403, 'You can only update teachers from your own campus');
+        }
+      } else if (!['ADMIN', 'DIRECTOR'].includes(req.user.role)) {
+        return sendError(res, 403, 'You are not authorized to update teachers');
+      }
+
+      // Check email uniqueness if being changed
       if (updates.email && updates.email.toLowerCase() !== teacher.email) {
+        if (!isValidEmail(updates.email)) {
+          return sendError(res, 400, 'Invalid email format');
+        }
+
         const emailExists = await Teacher.findOne({ 
           email: updates.email.toLowerCase(),
           _id: { $ne: id }
         });
+
         if (emailExists) {
-          return res.status(409).json({ 
-            success: false, 
-            message: 'This email is already in use' 
-          });
+          return sendConflict(res, 'This email is already in use');
         }
       }
 
-      // Check username uniqueness if username is being changed
+      // Check username uniqueness if being changed
       if (updates.username && updates.username.toLowerCase() !== teacher.username) {
         const usernameExists = await Teacher.findOne({ 
           username: updates.username.toLowerCase(),
           _id: { $ne: id }
         });
+
         if (usernameExists) {
-          return res.status(409).json({ 
-            success: false, 
-            message: 'This username is already taken' 
-          });
+          return sendConflict(res, 'This username is already taken');
         }
       }
 
-      // Handle image upload using utility
+      // Validate classes belong to same campus (if being updated)
+      if (updates.classes && Array.isArray(updates.classes) && updates.classes.length > 0) {
+        const validation = await validateMultipleClassesBelongToCampus(
+          updates.classes, 
+          teacher.schoolCampus
+        );
+
+        if (!validation.valid) {
+          return sendError(res, 400, 'Some assigned classes do not belong to the teacher\'s campus');
+        }
+      }
+
+      // Handle image upload
       const imageFile = files.teacher_image?.[0] || files.teacher_image || files.image?.[0] || files.image;
       
       if (imageFile) {
@@ -467,10 +496,7 @@ module.exports = {
           );
           updates.teacher_image = newImagePath;
         } catch (uploadError) {
-          return res.status(400).json({ 
-            success: false, 
-            message: uploadError.message 
-          });
+          return sendError(res, 400, uploadError.message);
         }
       }
 
@@ -491,64 +517,51 @@ module.exports = {
         .select('-password -salary')
         .populate('schoolCampus', 'campus_name')
         .populate('subjects', 'subjectName')
-        .populate('classes', 'className');
+        .populate('classes', 'className')
+        .lean();
 
-      res.status(200).json({
-        success: true,
-        message: 'Teacher updated successfully',
-        data: updatedTeacher
-      });
+      return sendSuccess(res, 200, 'Teacher updated successfully', updatedTeacher);
 
     } catch (error) {
       console.error('❌ Error updating teacher:', error);
       
       if (error.code === 11000) {
-        const field = Object.keys(error.keyPattern)[0];
-        return res.status(409).json({ 
-          success: false, 
-          message: `This ${field} is already in use` 
-        });
+        return handleDuplicateKeyError(res, error);
       }
 
       if (error.name === 'ValidationError') {
         const messages = Object.values(error.errors).map(err => err.message);
-        return res.status(400).json({ 
-          success: false, 
-          message: messages.join(', ') 
-        });
+        return sendError(res, 400, 'Validation failed', { errors: messages });
       }
 
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to update teacher',
-        error: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
+      return sendError(res, 500, 'Failed to update teacher');
     }
   },
 
   /**
    * Update teacher password
    * @route   PATCH /api/teacher/:id/password
-   * @access  Private - Teacher themselves or ADMIN
+   * @access  Private (Teacher themselves or ADMIN)
    */
   updateTeacherPassword: async (req, res) => {
     try {
       const { id } = req.params;
       const { currentPassword, newPassword } = req.body;
 
-      // Validate required fields
-      if (!currentPassword || !newPassword) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Current password and new password are required' 
-        });
+      // Validate ObjectId
+      if (!isValidObjectId(id)) {
+        return sendError(res, 400, 'Invalid teacher ID format');
       }
 
-      // Validate new password strength
-      if (newPassword.length < 8) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'New password must be at least 8 characters long' 
+      // Validate new password
+      if (!newPassword) {
+        return sendError(res, 400, 'New password is required');
+      }
+
+      const passwordValidation = validatePasswordStrength(newPassword);
+      if (!passwordValidation.valid) {
+        return sendError(res, 400, 'Password does not meet requirements', {
+          errors: passwordValidation.errors
         });
       }
 
@@ -557,29 +570,24 @@ module.exports = {
       const isAdmin = ['ADMIN', 'CAMPUS_MANAGER', 'DIRECTOR'].includes(req.user?.role);
 
       if (!isOwner && !isAdmin) {
-        return res.status(403).json({ 
-          success: false, 
-          message: 'You are not authorized to change this password' 
-        });
+        return sendError(res, 403, 'You are not authorized to change this password');
       }
 
-      // Fetch teacher with password field
+      // Fetch teacher with password
       const teacher = await Teacher.findById(id).select('+password');
       if (!teacher) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Teacher not found' 
-        });
+        return sendNotFound(res, 'Teacher');
       }
 
       // Verify current password (skip for ADMIN)
       if (!isAdmin) {
+        if (!currentPassword) {
+          return sendError(res, 400, 'Current password is required');
+        }
+
         const isMatch = await bcrypt.compare(currentPassword, teacher.password);
         if (!isMatch) {
-          return res.status(401).json({ 
-            success: false, 
-            message: 'Current password is incorrect' 
-          });
+          return sendError(res, 401, 'Current password is incorrect');
         }
       }
 
@@ -589,17 +597,11 @@ module.exports = {
 
       await teacher.save();
 
-      res.status(200).json({
-        success: true,
-        message: 'Password updated successfully'
-      });
+      return sendSuccess(res, 200, 'Password updated successfully');
 
     } catch (error) {
       console.error('❌ Password update error:', error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to update password' 
-      });
+      return sendError(res, 500, 'Failed to update password');
     }
   },
 
@@ -612,31 +614,32 @@ module.exports = {
     try {
       const { id } = req.params;
 
-      const teacher = await Teacher.findByIdAndUpdate(
-        id,
-        { status: 'archived' },
-        { new: true }
-      ).select('-password -salary');
-
-      if (!teacher) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Teacher not found' 
-        });
+      // Validate ObjectId
+      if (!isValidObjectId(id)) {
+        return sendError(res, 400, 'Invalid teacher ID format');
       }
 
-      res.status(200).json({
-        success: true,
-        message: 'Teacher archived successfully',
-        data: teacher
-      });
+      const teacher = await Teacher.findById(id);
+      if (!teacher) {
+        return sendNotFound(res, 'Teacher');
+      }
+
+      // Authorization
+      if (req.user.role === 'CAMPUS_MANAGER') {
+        if (teacher.schoolCampus.toString() !== req.user.campusId) {
+          return sendError(res, 403, 'You can only archive teachers from your own campus');
+        }
+      }
+
+      // Update status to archived
+      teacher.status = 'archived';
+      await teacher.save();
+
+      return sendSuccess(res, 200, 'Teacher archived successfully');
 
     } catch (error) {
       console.error('❌ Error archiving teacher:', error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to archive teacher' 
-      });
+      return sendError(res, 500, 'Failed to archive teacher');
     }
   },
 
@@ -649,31 +652,32 @@ module.exports = {
     try {
       const { id } = req.params;
 
-      const teacher = await Teacher.findByIdAndUpdate(
-        id,
-        { status: 'active' },
-        { new: true }
-      ).select('-password -salary');
-
-      if (!teacher) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Teacher not found' 
-        });
+      // Validate ObjectId
+      if (!isValidObjectId(id)) {
+        return sendError(res, 400, 'Invalid teacher ID format');
       }
 
-      res.status(200).json({
-        success: true,
-        message: 'Teacher restored successfully',
-        data: teacher
-      });
+      const teacher = await Teacher.findById(id);
+      if (!teacher) {
+        return sendNotFound(res, 'Teacher');
+      }
+
+      // Authorization
+      if (req.user.role === 'CAMPUS_MANAGER') {
+        if (teacher.schoolCampus.toString() !== req.user.campusId) {
+          return sendError(res, 403, 'You can only restore teachers from your own campus');
+        }
+      }
+
+      // Update status to active
+      teacher.status = 'active';
+      await teacher.save();
+
+      return sendSuccess(res, 200, 'Teacher restored successfully');
 
     } catch (error) {
       console.error('❌ Error restoring teacher:', error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to restore teacher' 
-      });
+      return sendError(res, 500, 'Failed to restore teacher');
     }
   },
 
@@ -686,12 +690,14 @@ module.exports = {
     try {
       const { id } = req.params;
 
+      // Validate ObjectId
+      if (!isValidObjectId(id)) {
+        return sendError(res, 400, 'Invalid teacher ID format');
+      }
+
       const teacher = await Teacher.findById(id);
       if (!teacher) {
-        return res.status(404).json({ 
-          success: false, 
-          message: 'Teacher not found' 
-        });
+        return sendNotFound(res, 'Teacher');
       }
 
       // Delete teacher image if exists
@@ -702,17 +708,11 @@ module.exports = {
       // Delete teacher from database
       await Teacher.findByIdAndDelete(id);
 
-      res.status(200).json({
-        success: true,
-        message: 'Teacher deleted permanently'
-      });
+      return sendSuccess(res, 200, 'Teacher deleted permanently');
 
     } catch (error) {
       console.error('❌ Error deleting teacher:', error);
-      res.status(500).json({ 
-        success: false, 
-        message: 'Failed to delete teacher' 
-      });
+      return sendError(res, 500, 'Failed to delete teacher');
     }
   }
 };

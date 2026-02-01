@@ -1,3 +1,4 @@
 node_modules
 usage_guides
+/api/uploads/
 .env

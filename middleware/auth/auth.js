@@ -1,12 +1,13 @@
 const jwt = require("jsonwebtoken");
 
 /**
- * JWT authentication middleware
+ * Enhanced JWT authentication middleware
  * Verifies the token and attaches user info to req.user
+ * Implements additional security checks
  */
 const authenticate = (req, res, next) => {
   try {
-    // Extracting the token with the correct format
+    // Extract the Authorization header
     const authHeader = req.header("Authorization");
     
     if (!authHeader) {
@@ -16,12 +17,14 @@ const authenticate = (req, res, next) => {
       });
     }
 
-    // Correct extraction of the token (with the space)
-    // const token = authHeader.replace("Bearer ", "").trim();
-
+    // Parse Bearer token format
     const parts = authHeader.split(' ');
+    
     if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      return res.status(401).json({ message: "Format de jeton invalide" });
+      return res.status(401).json({ 
+        success: false,
+        message: "Invalid token format. Use: Bearer <token>" 
+      });
     }
 
     const token = parts[1];
@@ -33,7 +36,7 @@ const authenticate = (req, res, next) => {
       });
     }
 
-    // Checking JWT_SECRET
+    // Verify JWT_SECRET exists
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) {
       console.error("❌ JWT_SECRET is not defined in environment variables");
@@ -43,19 +46,30 @@ const authenticate = (req, res, next) => {
       });
     }
 
-    // Verifying and decoding the token
-    const decoded = jwt.verify(token, jwtSecret);
+    // Verify and decode the token
+    const decoded = jwt.verify(token, jwtSecret, {
+      algorithms: ['HS256'], // Specify allowed algorithms for security
+      issuer: 'school-management-app' // Verify issuer if set during signing
+    });
     
-    // Adding user information to the request
+    // Attach user information to the request
     req.user = decoded;
 
-    // Everything is OK, proceed to the next middleware
+    // Additional security: Check if user has required fields
+    if (!decoded.id || !decoded.role) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid token payload. Please login again."
+      });
+    }
+
+    // Proceed to the next middleware
     next();
 
   } catch (error) {
     console.error("❌ Auth middleware error:", error.message);
 
-    // Handling specific JWT errors
+    // Handle specific JWT errors
     if (error.name === "JsonWebTokenError") {
       return res.status(401).json({
         success: false,
@@ -89,6 +103,7 @@ const authenticate = (req, res, next) => {
  * Role-based authorization middleware
  * Must be used AFTER authenticate middleware
  * @param {Array<string>} allowedRoles - List of authorized roles
+ * @returns {Function} Express middleware
  */
 const authorize = (allowedRoles = []) => {
   return (req, res, next) => {
@@ -136,9 +151,10 @@ const authorize = (allowedRoles = []) => {
 };
 
 /**
- * Combined authentication and authorization middleware (legacy support)
- * For backward compatibility with old code
+ * Combined authentication and authorization middleware
+ * Convenience function that combines both steps
  * @param {Array<string>} roles - List of authorized roles (optional)
+ * @returns {Function} Express middleware
  */
 const authMiddleware = (roles = []) => {
   return (req, res, next) => {
@@ -164,31 +180,31 @@ const authMiddleware = (roles = []) => {
 /**
  * Optional authentication middleware
  * Attaches user info if token is valid, but doesn't require it
+ * Useful for endpoints that work differently for authenticated users
  */
 const optionalAuth = (req, res, next) => {
   try {
     const authHeader = req.header("Authorization");
     
     if (!authHeader) {
-      return next();
+      return next(); // No token, continue without user
     }
 
-    //const token = authHeader.replace("Bearer ", "").trim();
     const parts = authHeader.split(' ');
     if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      return next();
+      return next(); // Invalid format, continue without user
     }
 
     const token = parts[1];
     
     if (!token) {
-      return next();
+      return next(); // No token, continue without user
     }
 
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) {
       console.error("❌ JWT_SECRET is not defined");
-      return next();
+      return next(); // Config error, continue without user
     }
 
     const decoded = jwt.verify(token, jwtSecret);
@@ -198,13 +214,14 @@ const optionalAuth = (req, res, next) => {
 
   } catch (error) {
     console.log("ℹ️ Optional auth failed (continuing anyway):", error.message);
-    next();
+    next(); // Continue without user on any error
   }
 };
 
 /**
  * Middleware to check if user is accessing their own resource
  * @param {string} paramName - Name of the route parameter containing the resource ID
+ * @returns {Function} Express middleware
  */
 const isOwner = (paramName = 'id') => {
   return (req, res, next) => {
@@ -242,8 +259,9 @@ const isOwner = (paramName = 'id') => {
  * Middleware to check if user is owner OR has specific roles
  * @param {string} paramName - Name of the route parameter
  * @param {Array<string>} allowedRoles - Roles that can bypass ownership check
+ * @returns {Function} Express middleware
  */
-const isOwnerOrRole = (paramName = 'id', allowedRoles = ['ADMIN']) => {
+const isOwnerOrRole = (paramName = 'id', allowedRoles = ['ADMIN', 'DIRECTOR']) => {
   return (req, res, next) => {
     try {
       if (!req.user) {
@@ -253,8 +271,8 @@ const isOwnerOrRole = (paramName = 'id', allowedRoles = ['ADMIN']) => {
         });
       }
 
-      const resourceId = req.params[paramName];
-      const userId = req.user.id;
+      const resourceId = String(req.params[paramName]);
+      const userId = String(req.user.id);
       const userRole = req.user.role;
 
       const isResourceOwner = resourceId === userId;
@@ -279,12 +297,76 @@ const isOwnerOrRole = (paramName = 'id', allowedRoles = ['ADMIN']) => {
   };
 };
 
-// Named exports - INCLUDE authMiddleware here!
+/**
+ * Campus access middleware
+ * Ensures users can only access resources from their campus
+ * (except ADMIN and DIRECTOR who have global access)
+ * @returns {Function} Express middleware
+ */
+const requireCampusAccess = () => {
+  return (req, res, next) => {
+    try {
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          message: "Authentication required"
+        });
+      }
+
+      // ADMIN and DIRECTOR have global access
+      if (req.user.role === 'ADMIN' || req.user.role === 'DIRECTOR') {
+        return next();
+      }
+
+      // Other roles must have a campusId
+      if (!req.user.campusId) {
+        return res.status(403).json({
+          success: false,
+          message: "Campus information not found in your account"
+        });
+      }
+
+      next();
+
+    } catch (error) {
+      console.error("❌ Campus access check error:", error.message);
+      return res.status(500).json({
+        success: false,
+        message: "Authorization error occurred"
+      });
+    }
+  };
+};
+
+/**
+ * Rate limiting bypass for admins
+ * Can be used with rate limiters to exempt admin users
+ * @returns {Function} Express middleware
+ */
+const skipRateLimitForAdmin = (req, res, next) => {
+  if (req.user && (req.user.role === 'ADMIN' || req.user.role === 'DIRECTOR')) {
+    req.rateLimit = { skip: true };
+  }
+  next();
+};
+
+// Named exports
 module.exports = {
+  // Core authentication
   authenticate,
   authorize,
   authMiddleware,
+  
+  // Optional/conditional auth
   optionalAuth,
+  
+  // Ownership checks
   isOwner,
-  isOwnerOrRole
+  isOwnerOrRole,
+  
+  // Campus-specific
+  requireCampusAccess,
+  
+  // Utilities
+  skipRateLimitForAdmin
 };

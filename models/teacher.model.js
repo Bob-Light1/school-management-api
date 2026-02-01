@@ -1,13 +1,18 @@
 const mongoose = require('mongoose');
 
+/**
+ * Teacher Model
+ * Represents a teacher assigned to a campus
+ * Campus isolation enforced through middleware and controllers
+ */
 const teacherSchema = new mongoose.Schema(
   {
-    // Academic Assignment
+    // **ACADEMIC ASSIGNMENT**
     schoolCampus: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'Campus',
+      ref: 'Campus', // Fixed: Consistent naming
       required: [true, 'Campus is required'],
-      index: true
+      index: true // Index for faster campus-based queries
     },
 
     subjects: [{
@@ -20,7 +25,7 @@ const teacherSchema = new mongoose.Schema(
       ref: 'Class'
     }],
 
-    // Personal Information
+    // **PERSONAL INFORMATION**
     firstName: {
       type: String,
       required: [true, 'First name is required'],
@@ -40,8 +45,10 @@ const teacherSchema = new mongoose.Schema(
     dateOfBirth: {
       type: Date,
       validate: {
-        validator: function(value) {
-          return !value || value < new Date();
+        validator: function (value) {
+          // Birth date cannot be in the future
+          if (!value) return true;
+          return value < new Date();
         },
         message: 'Date of birth cannot be in the future'
       }
@@ -56,7 +63,7 @@ const teacherSchema = new mongoose.Schema(
       required: [true, 'Gender is required']
     },
 
-    // Contact Information
+    // **CONTACT INFORMATION**
     email: {
       type: String,
       required: [true, 'Email is required'],
@@ -79,11 +86,11 @@ const teacherSchema = new mongoose.Schema(
       ]
     },
 
-    // Authentication
+    // **AUTHENTICATION**
     username: {
       type: String,
       unique: true,
-      sparse: true,
+      sparse: true, // Allows null but enforces uniqueness when present
       lowercase: true,
       trim: true,
       minlength: [3, 'Username must be at least 3 characters'],
@@ -98,10 +105,10 @@ const teacherSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Password is required'],
       minlength: [8, 'Password must be at least 8 characters'],
-      select: false
+      select: false // Don't include password in queries by default
     },
 
-    // Professional Information
+    // **PROFESSIONAL INFORMATION**
     qualification: {
       type: String,
       required: [true, 'Qualification is required'],
@@ -118,21 +125,22 @@ const teacherSchema = new mongoose.Schema(
     experience: {
       type: Number,
       min: [0, 'Experience cannot be negative'],
-      max: [50, 'Experience cannot exceed 50 years']
+      max: [50, 'Experience cannot exceed 50 years'],
+      default: 0
     },
 
-    // Profile
+    // **PROFILE**
     teacher_image: {
       type: String,
       default: null
     },
 
-    // Roles and Permissions
+    // **ROLES AND PERMISSIONS**
     roles: {
       type: [String],
       default: ['TEACHER'],
       validate: {
-        validator: function(roles) {
+        validator: function (roles) {
           const validRoles = ['TEACHER', 'HEAD_TEACHER', 'DEPARTMENT_HEAD'];
           return roles.every(role => validRoles.includes(role));
         },
@@ -140,17 +148,18 @@ const teacherSchema = new mongoose.Schema(
       }
     },
 
-    // Status
+    // **STATUS**
     status: {
       type: String,
       enum: {
         values: ['active', 'inactive', 'suspended', 'archived'],
         message: '{VALUE} is not a valid status'
       },
-      default: 'active'
+      default: 'active',
+      index: true
     },
 
-    // Employment Information
+    // **EMPLOYMENT INFORMATION**
     hireDate: {
       type: Date,
       default: Date.now
@@ -171,7 +180,7 @@ const teacherSchema = new mongoose.Schema(
       select: false // Hidden by default for privacy
     },
 
-    // Metadata
+    // **METADATA**
     lastLogin: {
       type: Date,
       default: null
@@ -184,13 +193,13 @@ const teacherSchema = new mongoose.Schema(
   }
 );
 
-// Indexes for performance
-teacherSchema.index({ email: 1 });
-teacherSchema.index({ username: 1 });
-teacherSchema.index({ schoolCampus: 1 });
-teacherSchema.index({ status: 1 });
-teacherSchema.index({ firstName: 1, lastName: 1 });
+// **COMPOUND INDEXES FOR PERFORMANCE**
+teacherSchema.index({ schoolCampus: 1, status: 1 }); // Filter by campus and status
+teacherSchema.index({ firstName: 1, lastName: 1 }); // Search by name
+teacherSchema.index({ employmentType: 1, status: 1 }); // Employment reports
+teacherSchema.index({ createdAt: -1 }); // Sort by creation date
 
+// **VIRTUAL FIELDS**
 // Virtual for full name
 teacherSchema.virtual('fullName').get(function () {
   return `${this.firstName} ${this.lastName}`;
@@ -199,26 +208,111 @@ teacherSchema.virtual('fullName').get(function () {
 // Virtual for age (if dateOfBirth exists)
 teacherSchema.virtual('age').get(function () {
   if (!this.dateOfBirth) return null;
+  
   const today = new Date();
   const birthDate = new Date(this.dateOfBirth);
   let age = today.getFullYear() - birthDate.getFullYear();
   const monthDiff = today.getMonth() - birthDate.getMonth();
+  
   if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
     age--;
   }
+  
   return age;
 });
 
-// Pre-save middleware to ensure lowercase
+// Virtual for years of service
+teacherSchema.virtual('yearsOfService').get(function () {
+  if (!this.hireDate) return 0;
+  
+  const today = new Date();
+  const hireDate = new Date(this.hireDate);
+  let years = today.getFullYear() - hireDate.getFullYear();
+  const monthDiff = today.getMonth() - hireDate.getMonth();
+  
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < hireDate.getDate())) {
+    years--;
+  }
+  
+  return Math.max(0, years);
+});
+
+// **PRE-SAVE MIDDLEWARE**
+// Ensure lowercase for email and username
 teacherSchema.pre('save', function (next) {
   if (this.email) {
-    this.email = this.email.toLowerCase();
+    this.email = this.email.toLowerCase().trim();
   }
   if (this.username) {
-    this.username = this.username.toLowerCase();
+    this.username = this.username.toLowerCase().trim();
   }
   next();
 });
+
+// **PRE-VALIDATE MIDDLEWARE**
+// Ensure teacher's classes and subjects belong to the same campus
+teacherSchema.pre('validate', async function (next) {
+  if (this.isNew || this.isModified('classes') || this.isModified('schoolCampus')) {
+    if (this.classes && this.classes.length > 0 && this.schoolCampus) {
+      try {
+        const Class = mongoose.model('Class');
+        
+        // Check all classes belong to the same campus
+        const classes = await Class.find({ _id: { $in: this.classes } });
+        
+        const invalidClasses = classes.filter(
+          cls => cls.campus.toString() !== this.schoolCampus.toString()
+        );
+        
+        if (invalidClasses.length > 0) {
+          return next(new Error('All assigned classes must belong to the same campus as the teacher'));
+        }
+      } catch (error) {
+        return next(error);
+      }
+    }
+  }
+  next();
+});
+
+// **METHODS**
+// Check if teacher can login (active status)
+teacherSchema.methods.canLogin = function () {
+  return this.status === 'active';
+};
+
+// Check if teacher has a specific role
+teacherSchema.methods.hasRole = function (role) {
+  return this.roles.includes(role);
+};
+
+// Get teacher's campus info
+teacherSchema.methods.getCampusInfo = async function () {
+  await this.populate('schoolCampus', 'campus_name location').execPopulate();
+  return this.schoolCampus;
+};
+
+// **STATICS**
+// Find active teachers in a campus
+teacherSchema.statics.findActiveByCampus = function (campusId) {
+  return this.find({ schoolCampus: campusId, status: 'active' });
+};
+
+// Find teachers by subject
+teacherSchema.statics.findBySubject = function (subjectId) {
+  return this.find({ 
+    subjects: subjectId, 
+    status: { $ne: 'archived' } 
+  });
+};
+
+// Count teachers per campus
+teacherSchema.statics.countByCampus = function (campusId) {
+  return this.countDocuments({ 
+    schoolCampus: campusId, 
+    status: { $ne: 'archived' } 
+  });
+};
 
 const Teacher = mongoose.model('Teacher', teacherSchema);
 

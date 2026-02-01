@@ -11,8 +11,8 @@ const { authenticate, authorize } = require("../middleware/auth/auth");
 
 const router = express.Router();
 
-const adminRoles = ["CAMPUS_MANAGER", "DIRECTOR"];
-const staffRoles = ["CAMPUS_MANAGER", "DIRECTOR", "TEACHER"];
+const adminRoles = ["ADMIN",  "DIRECTOR", "CAMPUS_MANAGER"];
+const staffRoles = ["ADMIN",  "DIRECTOR", "CAMPUS_MANAGER", "TEACHER"];
 
 // Apply authentication to all routes
 router.use(authenticate);
