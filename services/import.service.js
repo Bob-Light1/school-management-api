@@ -1,0 +1,384 @@
+const fs = require('fs').promises;
+const csv = require('csv-parser');
+const { createReadStream } = require('fs');
+const ExcelJS = require('exceljs');
+const bcrypt = require('bcrypt');
+
+/**
+ * IMPORT SERVICE
+ * 
+ * Handles import from CSV and Excel formats
+ * Reusable for any entity (Student, Teacher, Parent, etc.)
+ * 
+ * Features:
+ * - CSV import (handles UTF-8 BOM)
+ * - Excel import (.xlsx, .xls)
+ * - Data validation
+ * - Duplicate detection
+ * - Error reporting (row-by-row)
+ * - Password hashing
+ * - Campus isolation
+ * - Dry-run mode (validation only)
+ */
+
+class ImportService {
+  constructor(Model, entityConfig) {
+    this.Model = Model;
+    this.entityConfig = {
+      name: entityConfig.name || 'Entity',
+      nameLower: (entityConfig.name || 'entity').toLowerCase(),
+      requiredFields: entityConfig.requiredFields || ['firstName', 'lastName', 'email'],
+      uniqueFields: entityConfig.uniqueFields || ['email'],
+      defaultValues: entityConfig.defaultValues || {},
+      fieldMapping: entityConfig.fieldMapping || {},
+      validators: entityConfig.validators || {},
+      ...entityConfig,
+    };
+  }
+
+  /**
+   * Parse CSV file
+   */
+  async parseCSV(filePath) {
+    return new Promise((resolve, reject) => {
+      const rows = [];
+      
+      createReadStream(filePath)
+        .pipe(csv({
+          skipEmptyLines: true,
+          trim: true,
+          mapHeaders: ({ header }) => header.trim().toLowerCase().replace(/\s+/g, '_'),
+        }))
+        .on('data', (row) => {
+          // Remove BOM if present
+          const cleanedRow = {};
+          Object.keys(row).forEach(key => {
+            const cleanKey = key.replace(/^\uFEFF/, '');
+            cleanedRow[cleanKey] = row[key];
+          });
+          rows.push(cleanedRow);
+        })
+        .on('end', () => resolve(rows))
+        .on('error', reject);
+    });
+  }
+
+  /**
+   * Parse Excel file
+   */
+  async parseExcel(filePath) {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(filePath);
+
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) {
+      throw new Error('Excel file is empty or invalid');
+    }
+
+    const rows = [];
+    const headers = [];
+
+    // Get headers from first row
+    worksheet.getRow(1).eachCell((cell, colNumber) => {
+      headers[colNumber] = cell.value?.toString()
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '_') || `column_${colNumber}`;
+    });
+
+    // Get data rows
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return; // Skip header
+
+      const rowData = {};
+      row.eachCell((cell, colNumber) => {
+        const header = headers[colNumber];
+        if (header) {
+          rowData[header] = cell.value?.toString().trim() || '';
+        }
+      });
+
+      // Only add non-empty rows
+      if (Object.values(rowData).some(val => val !== '')) {
+        rows.push(rowData);
+      }
+    });
+
+    return rows;
+  }
+
+  /**
+   * Map field names (handle different column naming)
+   */
+  mapFields(row) {
+    const mapped = {};
+    
+    Object.keys(row).forEach(key => {
+      const mappedKey = this.entityConfig.fieldMapping[key] || key;
+      mapped[mappedKey] = row[key];
+    });
+
+    return mapped;
+  }
+
+  /**
+   * Validate row data
+   */
+  validateRow(row, rowNumber) {
+    const errors = [];
+
+    // Check required fields
+    this.entityConfig.requiredFields.forEach(field => {
+      if (!row[field] || row[field].toString().trim() === '') {
+        errors.push(`Missing required field: ${field}`);
+      }
+    });
+
+    // Custom validators
+    Object.keys(this.entityConfig.validators).forEach(field => {
+      const validator = this.entityConfig.validators[field];
+      const value = row[field];
+
+      if (value) {
+        const validationResult = validator(value);
+        if (validationResult !== true) {
+          errors.push(validationResult);
+        }
+      }
+    });
+
+    // Email validation
+    if (row.email) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(row.email)) {
+        errors.push('Invalid email format');
+      }
+    }
+
+    return errors.length > 0 ? errors : null;
+  }
+
+  /**
+   * Check for duplicates
+   */
+  async checkDuplicates(row) {
+    const duplicates = [];
+
+    for (const field of this.entityConfig.uniqueFields) {
+      if (row[field]) {
+        const query = { [field]: row[field].toLowerCase() };
+        const exists = await this.Model.findOne(query);
+        
+        if (exists) {
+          duplicates.push(`${field} "${row[field]}" already exists`);
+        }
+      }
+    }
+
+    return duplicates.length > 0 ? duplicates : null;
+  }
+
+  /**
+   * Prepare entity data
+   */
+  async prepareEntityData(row, campusId) {
+    const data = {
+      ...this.entityConfig.defaultValues,
+      firstName: row.first_name || row.firstName,
+      lastName: row.last_name || row.lastName,
+      email: (row.email || '').toLowerCase(),
+      phone: row.phone || '',
+      gender: row.gender?.toLowerCase() || 'male',
+      username: row.username || (row.email || '').split('@')[0].toLowerCase(),
+      schoolCampus: campusId,
+      status: row.status || 'active',
+    };
+
+    // Handle password
+    const password = row.password || this.entityConfig.defaultPassword || 'Default@123';
+    data.password = await bcrypt.hash(password, 10);
+
+    // Additional entity-specific fields
+    if (row.matricule) data.matricule = row.matricule;
+    if (row.date_of_birth || row.dateOfBirth) {
+      data.dateOfBirth = new Date(row.date_of_birth || row.dateOfBirth);
+    }
+
+    // Apply custom transformer if provided
+    if (this.entityConfig.transformer) {
+      return this.entityConfig.transformer(data, row);
+    }
+
+    return data;
+  }
+
+  /**
+   * Import entities
+   */
+  async import(file, campusId, userRole, userCampusId, options = {}) {
+    const { dryRun = false } = options;
+
+    try {
+      // Campus isolation check
+      if (userRole === 'CAMPUS_MANAGER' && campusId !== userCampusId) {
+        throw new Error('Can only import to your campus');
+      }
+
+      if (!file || !file.path) {
+        throw new Error('No file provided');
+      }
+
+      // Determine file type and parse
+      const fileExtension = file.originalname.split('.').pop().toLowerCase();
+      let rows;
+
+      if (fileExtension === 'csv') {
+        rows = await this.parseCSV(file.path);
+      } else if (['xlsx', 'xls'].includes(fileExtension)) {
+        rows = await this.parseExcel(file.path);
+      } else {
+        throw new Error('Unsupported file format. Use CSV or Excel (.xlsx, .xls)');
+      }
+
+      if (rows.length === 0) {
+        throw new Error('File is empty or invalid');
+      }
+
+      const results = {
+        total: rows.length,
+        imported: 0,
+        failed: 0,
+        errors: [],
+        warnings: [],
+      };
+
+      // Process each row
+      for (let i = 0; i < rows.length; i++) {
+        const rawRow = rows[i];
+        const rowNumber = i + 2; // +2 because index starts at 0 and row 1 is header
+
+        try {
+          // Map fields
+          const row = this.mapFields(rawRow);
+
+          // Validate
+          const validationErrors = this.validateRow(row, rowNumber);
+          if (validationErrors) {
+            throw new Error(validationErrors.join('; '));
+          }
+
+          // Check duplicates
+          const duplicateErrors = await this.checkDuplicates(row);
+          if (duplicateErrors) {
+            throw new Error(duplicateErrors.join('; '));
+          }
+
+          // Prepare data
+          const entityData = await this.prepareEntityData(row, campusId);
+
+          // Create entity (if not dry-run)
+          if (!dryRun) {
+            await this.Model.create(entityData);
+          }
+
+          results.imported++;
+
+        } catch (error) {
+          results.failed++;
+          results.errors.push({
+            row: rowNumber,
+            data: rawRow,
+            error: error.message,
+          });
+
+          // Stop if too many errors (configurable)
+          const maxErrors = this.entityConfig.maxErrors || 100;
+          if (results.errors.length >= maxErrors) {
+            results.warnings.push(`Stopped after ${maxErrors} errors`);
+            break;
+          }
+        }
+      }
+
+      // Cleanup file
+      await fs.unlink(file.path).catch(() => {});
+
+      return {
+        success: results.failed === 0,
+        message: dryRun 
+          ? `Validation completed: ${results.imported} valid, ${results.failed} invalid`
+          : `Import completed: ${results.imported} imported, ${results.failed} failed`,
+        data: results,
+      };
+
+    } catch (error) {
+      // Cleanup file on error
+      if (file?.path) {
+        await fs.unlink(file.path).catch(() => {});
+      }
+
+      console.error('❌ Import Error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get import template (CSV)
+   */
+  getTemplateCSV() {
+    const headers = this.entityConfig.requiredFields
+      .concat(Object.keys(this.entityConfig.defaultValues || {}))
+      .map(field => field.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()));
+
+    const csv = '\uFEFF' + headers.join(',') + '\n';
+    
+    return {
+      data: csv,
+      filename: `${this.entityConfig.nameLower}_import_template.csv`,
+      contentType: 'text/csv; charset=utf-8',
+    };
+  }
+
+  /**
+   * Get import template (Excel)
+   */
+  async getTemplateExcel() {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Template');
+
+    // Headers
+    const headers = this.entityConfig.requiredFields
+      .concat(Object.keys(this.entityConfig.defaultValues || {}));
+
+    worksheet.columns = headers.map(field => ({
+      header: field.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+      key: field,
+      width: 20,
+    }));
+
+    // Style header
+    worksheet.getRow(1).font = { bold: true, size: 12, color: { argb: 'FFFFFF' } };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: '1F4E78' },
+    };
+
+    // Add example row
+    const exampleRow = {};
+    headers.forEach(field => {
+      exampleRow[field] = `Example ${field}`;
+    });
+    worksheet.addRow(exampleRow);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+
+    return {
+      data: buffer,
+      filename: `${this.entityConfig.nameLower}_import_template.xlsx`,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+  }
+}
+
+module.exports = ImportService;

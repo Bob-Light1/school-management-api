@@ -12,11 +12,18 @@ const {
   getCampusClasses,
   getCampusTeachers,
   getCampusStudents,
-  getCampusDashboardStats
+  getCampusDashboardStats,
+  getCampusStudentsStats
 } = require('../controllers/campus.controller');
 
 const { authenticate, authorize } = require('../middleware/auth/auth');
 const { loginLimiter, strictLimiter, apiLimiter } = require('../middleware/rate-limiter/rate-limiter');
+
+// ✅ MULTER: Import upload middleware
+const { 
+  uploadCampusImage, 
+  handleMulterError 
+} = require('../middleware/upload/upload');
 
 const router = express.Router();
 
@@ -58,6 +65,8 @@ router.post(
   "/create", 
   strictLimiter,
   authorize(['ADMIN', 'DIRECTOR']),
+  uploadCampusImage,     // Multer middleware handles image upload
+  handleMulterError,     // Multer error handler
   createCampus
 );
 
@@ -79,7 +88,9 @@ router.get(
  */
 router.put(
   "/:id", 
-  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadCampusImage,     //Optional image upload
+  handleMulterError,
   updateCampus
 );
 
@@ -110,7 +121,7 @@ router.delete(
 // ========================================
 
 /**
- * @route   GET /api/campus/:id/context
+ * @route   GET /api/campus/:campusId/context
  * @desc    Get campus context with basic statistics
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
@@ -121,7 +132,7 @@ router.get(
 );
 
 /**
- * @route   GET /api/campus/:id/dashboard
+ * @route   GET /api/campus/:campusId/dashboard
  * @desc    Get campus dashboard statistics
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
@@ -136,23 +147,23 @@ router.get(
 // ========================================
 
 /**
- * @route   GET /api/campus/:id/students
+ * @route   GET /api/campus/:campusId/students
  * @desc    Get all students in a campus
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
 router.get(
-  "/:id/students", 
+  "/:campusId/students", 
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
   getCampusStudents
 );
 
 /**
- * @route   GET /api/campus/:id/teachers
+ * @route   GET /api/campus/:campusId/teachers
  * @desc    Get all teachers in a campus
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
 router.get(
-  "/:id/teachers", 
+  "/:campusId/teachers", 
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
   getCampusTeachers
 );
@@ -169,6 +180,18 @@ router.get(
 );
 
 /**
+ * @route   GET /api/campus/:campusId/students/stats
+ * @desc    Get students statistics for all the campus
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ * @note    Administration should be able to see directly all important statistics
+ */
+router.get(
+  '/:campusId/students/stats', 
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  getCampusStudentsStats
+);
+
+/**
  * @route   GET /api/campus/:id/staff
  * @desc    Get all staff in a campus
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
@@ -178,6 +201,6 @@ router.get(
   *  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
   *  getCampusStaff
   *)
-  */;
+  */
 
 module.exports = router;

@@ -154,8 +154,8 @@ app.use('/api/campus', campusRouter);
 app.use('/api/class', classRouter);
 app.use('/api/level', levelRouter);
 app.use('/api/subject', subjectRouter);
-app.use('/api/student', studentRouter);
-app.use('/api/teacher', teacherRouter);
+app.use('/api/students', studentRouter);
+app.use('/api/teachers', teacherRouter);
 app.use('/api/admin', adminRouter);
 
 // ========================================

@@ -2,20 +2,24 @@ const express = require('express');
 const router = express.Router();
 
 const teacherController = require('../controllers/teacher.controller');
-const parseFormData = require('../middleware/formidable/formidable');
 const { authenticate, authorize, isOwnerOrRole } = require('../middleware/auth/auth');
 const { loginLimiter, apiLimiter } = require('../middleware/rate-limiter/rate-limiter');
+const { 
+  uploadProfileImage,
+  uploadDocument,
+  handleMulterError 
+} = require('../middleware/upload/upload');
 
 // Role configurations
 const ADMIN_ROLES = ['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER'];
-const STAFF_VIEW_ROLES = ['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER', 'TEACHER'];
+const STAFF_ROLES = ['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER', 'TEACHER'];
 
 // ========================================
 // PUBLIC ROUTES (No Authentication)
 // ========================================
 
 /**
- * @route   POST /api/teacher/login
+ * @route   POST /api/teachers/login
  * @desc    Teacher login
  * @access  Public
  */
@@ -23,7 +27,6 @@ router.post('/login', loginLimiter, teacherController.loginTeacher);
 
 // ========================================
 // PROTECTED ROUTES (Authentication Required)
-// All routes below require authentication
 // ========================================
 router.use(authenticate);
 
@@ -32,26 +35,26 @@ router.use(authenticate);
 // ========================================
 
 /**
- * @route   POST /api/teacher
+ * @route   POST /api/teachers
  * @desc    Create a new teacher
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  * @note    Campus is automatically assigned based on user role
  *          Classes must belong to the same campus
- */
+ ***/
 router.post(
   '/',
   authorize(ADMIN_ROLES),
-  parseFormData(), // Parse multipart/form-data for image upload
+  uploadProfileImage,
+  handleMulterError,    
   teacherController.createTeacher
 );
 
 /**
- * @route   GET /api/teacher
+ * @route   GET /api/teachers
  * @desc    Get all teachers with filters and pagination
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  * @query   page, limit, search, status, gender, employmentType, campusId (ADMIN only)
- * @note    🔥 CRITICAL FIX: Campus isolation enforced
- *          Managers can ONLY see teachers from their campus
+ * @note    CRITICAL FIX: Campus isolation enforced -> anagers can ONLY see teachers from their campus
  */
 router.get(
   '/',
@@ -65,7 +68,7 @@ router.get(
 // ========================================
 
 /**
- * @route   GET /api/teacher/:id
+ * @route   GET /api/teachers/:id
  * @desc    Get a single teacher by ID
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER, TEACHER (own profile)
  * @note    Teachers can view their own profile
@@ -78,21 +81,23 @@ router.get(
 );
 
 /**
- * @route   PATCH /api/teacher/:id
+ * @route   PATCH /api/teachers/:id
  * @desc    Update teacher information
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  * @note    Cannot change campus, password, or salary via this route
  *          Classes must belong to the same campus
- */
-router.patch(
+ * **/
+
+router.put(
   '/:id',
   authorize(ADMIN_ROLES),
-  parseFormData(), // Parse multipart/form-data for image upload
+  uploadProfileImage,  
+  handleMulterError,
   teacherController.updateTeacher
 );
 
 /**
- * @route   PATCH /api/teacher/:id/password
+ * @route   PATCH /api/teachers/:id/password
  * @desc    Update teacher password
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER, TEACHER (own password)
  * @note    Teachers must provide current password
@@ -109,7 +114,7 @@ router.patch(
 // ========================================
 
 /**
- * @route   DELETE /api/teacher/:id
+ * @route   DELETE /api/teachers/:id
  * @desc    Archive teacher (soft delete)
  * @access  ADMIN, DIRECTOR
  * @note    Sets status to 'archived', doesn't delete from database
@@ -121,7 +126,7 @@ router.delete(
 );
 
 /**
- * @route   PATCH /api/teacher/:id/restore
+ * @route   PATCH /api/teachers/:id/restore
  * @desc    Restore archived teacher
  * @access  ADMIN, DIRECTOR
  * @note    Sets status back to 'active'
@@ -133,7 +138,7 @@ router.patch(
 );
 
 /**
- * @route   DELETE /api/teacher/:id/permanent
+ * @route   DELETE /api/teachers/:id/permanent
  * @desc    Permanently delete teacher
  * @access  ADMIN only
  * @note    ⚠️ DESTRUCTIVE - Cannot be undone, also deletes teacher image
@@ -142,6 +147,123 @@ router.delete(
   '/:id/permanent',
   authorize(['ADMIN']),
   teacherController.deleteTeacherPermanently
+);
+
+// ========================================
+// BULK OPERATIONS
+// ========================================
+
+/**
+ * @route   POST /api/teachers/bulk/change-department
+ * @desc    Change department for multiple teachers
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+/*router.post(
+  '/bulk/change-department',
+  authorize(ADMIN_ROLES),
+  teacherController.bulkChangeDepartment
+);*/
+
+/**
+ * @route   POST /api/teachers/bulk/email
+ * @desc    Send email to many teachers
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ * @note    Allow user to send many emails to many teachers at once
+ */
+router.post(
+  '/bulk/email',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.bulkSendEmail
+);
+
+/**
+ * @route   POST /api/teachers/bulk/archive
+ * @desc    Archive many teachers at once
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ * @note    Allow user to select many teachers and archive them
+ */
+router.post(
+  '/bulk/archive',
+  authorize(['ADMIN', 'DIRECTOR']),
+  teacherController.bulkArchive
+);
+
+
+// ========================================
+// IMPORT/EXPORT OPERATIONS
+// ========================================
+
+/**
+ * @route   GET /api/teachers/export/csv
+ * @desc    Export teacher's information to CSV
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  '/export/csv',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.exportToCSV
+);
+
+
+/**
+ * @route   GET /api/teachers/export/excel
+ * @desc    Export teacher's information to Excel
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  '/export/excel',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.exportToExcel
+);
+
+/**
+ * @route   GET /api/teachers/export
+ * @desc    Alias for backward compatibility
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  '/export',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.exportToCSV
+);
+
+/**
+ * @route   POST /api/teachers/import
+ * @desc    Import teacher's information from CSV/Excel
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.post(
+  '/import',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadDocument,        // Upload CSV/Excel file
+  handleMulterError,
+  studentController.importFromFile
+);
+
+/**
+ * @route   POST /api/teachers/import/template/csv
+ * @desc    Import CSV template
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.post(
+  '/import/template/csv',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadDocument,        // Upload CSV file
+  handleMulterError,
+  studentController.getImportTemplateCSV
+);
+
+/**
+ * @route   POST /api/teachers/import/template/excel
+ * @desc    Import Excel template
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.post(
+  '/import/template/excel',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadDocument,        // Upload Excel file
+  handleMulterError,
+  studentController.getImportTemplateExcel
 );
 
 module.exports = router;

@@ -92,6 +92,15 @@ const studentSchema = new mongoose.Schema(
       select: false // Don't include password in queries by default
     },
 
+    passwordResetToken: {
+      type: String,
+      select: false
+    },
+    passwordResetExpires: {
+      type: Date,
+      select: false
+    },
+
     // **PROFILE**
     profileImage: {
       type: String,
@@ -134,6 +143,7 @@ const studentSchema = new mongoose.Schema(
         message: '{VALUE} is not a valid status'
       },
       default: 'active',
+      index: true
     },
 
     // **METADATA**
@@ -158,6 +168,7 @@ const studentSchema = new mongoose.Schema(
       relationship: { type: String, trim: true }
     }
   },
+
   {
     timestamps: true, // Adds createdAt and updatedAt
     toJSON: { virtuals: true },
@@ -196,7 +207,7 @@ studentSchema.virtual('age').get(function () {
 
 // **PRE-SAVE MIDDLEWARE**
 // Ensure email and username are lowercase
-studentSchema.pre('save', function (next) {
+studentSchema.pre('save', function () {
   if (this.email) {
     this.email = this.email.toLowerCase().trim();
   }
@@ -206,27 +217,43 @@ studentSchema.pre('save', function (next) {
   if (this.matricule) {
     this.matricule = this.matricule.toUpperCase().trim();
   }
-  next();
 });
 
 // **PRE-VALIDATE MIDDLEWARE**
 // Ensure student's class belongs to the same campus
-studentSchema.pre('validate', async function (next) {
+studentSchema.pre('validate', async function () {
   if (this.isNew || this.isModified('studentClass') || this.isModified('schoolCampus')) {
     if (this.studentClass && this.schoolCampus) {
       try {
         const Class = mongoose.model('Class');
-        const studentClass = await Class.findById(this.studentClass);
+        const studentClassDoc = await Class.findById(this.studentClass)
+          .select('schoolCampus')
+          .lean();
         
-        if (studentClass && studentClass.campus.toString() !== this.schoolCampus.toString()) {
-          return next(new Error('Student class must belong to the same campus'));
+        if (studentClassDoc) {
+          if(studentClassDoc.schoolCampus.toString() !== this.schoolCampus.toString()){
+            this.invalidate(
+              'studentClass',
+              'The selected class does not belong to this campus.',
+              this.studentClass
+            );
+          }
+        }else {
+          this.invalidate(
+            'studentClass',
+            'Selected class does not exist.',
+            this.studentClass
+          );
         }
       } catch (error) {
-        return next(error);
+        this.invalidate(
+          'studentClass',
+          'Error during class verification',
+          this.studentClass
+        );
       }
     }
   }
-  next();
 });
 
 // **METHODS**
@@ -249,7 +276,10 @@ studentSchema.statics.findActiveByCampus = function (campusId) {
 
 // Find students by class
 studentSchema.statics.findByClass = function (classId) {
-  return this.find({ studentClass: classId, status: { $ne: 'archived' } });
+  return this.find({ 
+    studentClass: classId, 
+    status: { $ne: 'archived' } 
+  });
 };
 
 // Count students per campus

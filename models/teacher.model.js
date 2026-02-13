@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 /**
  * Teacher Model
@@ -24,6 +25,12 @@ const teacherSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Class'
     }],
+
+    department: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Department',
+      required: [true, 'Department is required']
+    },
 
     // **PERSONAL INFORMATION**
     firstName: {
@@ -67,7 +74,6 @@ const teacherSchema = new mongoose.Schema(
     email: {
       type: String,
       required: [true, 'Email is required'],
-      unique: true,
       lowercase: true,
       trim: true,
       match: [
@@ -108,6 +114,15 @@ const teacherSchema = new mongoose.Schema(
       select: false // Don't include password in queries by default
     },
 
+    passwordResetToken: {
+      type: String,
+      select: false
+    },
+    passwordResetExpires: {
+      type: Date,
+      select: false
+    },
+
     // **PROFESSIONAL INFORMATION**
     qualification: {
       type: String,
@@ -130,7 +145,7 @@ const teacherSchema = new mongoose.Schema(
     },
 
     // **PROFILE**
-    teacher_image: {
+    profileImage: {
       type: String,
       default: null
     },
@@ -141,11 +156,20 @@ const teacherSchema = new mongoose.Schema(
       default: ['TEACHER'],
       validate: {
         validator: function (roles) {
-          const validRoles = ['TEACHER', 'HEAD_TEACHER', 'DEPARTMENT_HEAD'];
+          const validRoles = ['TEACHER', 'MENTOR', 'DEPARTMENT_HEAD'];
           return roles.every(role => validRoles.includes(role));
         },
         message: 'Invalid role specified'
       }
+    },
+
+     // **ADDITIONAL ACADEMIC INFO**
+     matricule: {
+      type: String,
+      unique: true,
+      sparse: true, // Allows null but enforces uniqueness when present
+      uppercase: true,
+      trim: true
     },
 
     // **STATUS**
@@ -184,8 +208,21 @@ const teacherSchema = new mongoose.Schema(
     lastLogin: {
       type: Date,
       default: null
+    },
+
+
+    // **EMERGENCY CONTACT**
+    emergencyContact: {
+      name: { type: String, trim: true },
+      phone: { 
+        type: String, 
+        trim: true,
+        match: [/^\+?[0-9\s()-]{6,20}$/, 'Invalid emergency contact phone']
+      },
+      relationship: { type: String, trim: true }
     }
   },
+
   {
     timestamps: true,
     toJSON: { virtuals: true },
@@ -194,6 +231,10 @@ const teacherSchema = new mongoose.Schema(
 );
 
 // **COMPOUND INDEXES FOR PERFORMANCE**
+teacherSchema.index(
+  { schoolCampus: 1, email: 1 },
+  { unique: true }
+);
 teacherSchema.index({ schoolCampus: 1, status: 1 }); // Filter by campus and status
 teacherSchema.index({ firstName: 1, lastName: 1 }); // Search by name
 teacherSchema.index({ employmentType: 1, status: 1 }); // Employment reports
@@ -239,40 +280,64 @@ teacherSchema.virtual('yearsOfService').get(function () {
 
 // **PRE-SAVE MIDDLEWARE**
 // Ensure lowercase for email and username
-teacherSchema.pre('save', function (next) {
+teacherSchema.pre('save', function () {
   if (this.email) {
     this.email = this.email.toLowerCase().trim();
   }
   if (this.username) {
     this.username = this.username.toLowerCase().trim();
   }
-  next();
+  if (this.matricule) {
+    this.matricule = this.matricule.toUpperCase().trim();
+  }
 });
 
 // **PRE-VALIDATE MIDDLEWARE**
 // Ensure teacher's classes and subjects belong to the same campus
-teacherSchema.pre('validate', async function (next) {
+teacherSchema.pre('validate', async function () {
   if (this.isNew || this.isModified('classes') || this.isModified('schoolCampus')) {
     if (this.classes && this.classes.length > 0 && this.schoolCampus) {
       try {
         const Class = mongoose.model('Class');
         
         // Check all classes belong to the same campus
-        const classes = await Class.find({ _id: { $in: this.classes } });
-        
-        const invalidClasses = classes.filter(
-          cls => cls.campus.toString() !== this.schoolCampus.toString()
+        const classDocs = await Class.find(
+          { _id: { $in: this.classes } },
+          'schoolCampus'
+        ).lean();
+
+        if (classDocs.length !== this.classes.length) {
+          throw new Error('One or more assigned classes does not exist !');
+        }
+     
+        const wrongCampus = classDocs.some(
+          c => c.schoolCampus.toString() !== this.schoolCampus.toString()
         );
-        
-        if (invalidClasses.length > 0) {
-          return next(new Error('All assigned classes must belong to the same campus as the teacher'));
+
+        if (wrongCampus) {
+          throw new Error('All assigned classes must belong to the same campus as the teacher');
+        }
+
+        //Subjects verification
+        if ((this.isModified('subjects') || this.isModified('schoolCampus')) && this.subjects?.length > 0) {
+            const Subject = mongoose.model('Subject');
+            const subjectDocs = await Subject.find(
+              { _id: { $in: this.subjects } },
+            ).lean();
+
+            const wrongSubjectCampus = subjectDocs.some(
+              s => s.schoolCampus && s.schoolCampus.toString() !== this.schoolCampus.toString()
+            );
+
+            if (wrongSubjectCampus) {
+              throw new Error('All assigned subjects must belong to the same campus as the teacher.');
+            }
         }
       } catch (error) {
-        return next(error);
+        throw new Error(error.message);
       }
     }
   }
-  next();
 });
 
 // **METHODS**
@@ -288,7 +353,7 @@ teacherSchema.methods.hasRole = function (role) {
 
 // Get teacher's campus info
 teacherSchema.methods.getCampusInfo = async function () {
-  await this.populate('schoolCampus', 'campus_name location').execPopulate();
+  await this.populate('schoolCampus', 'campus_name location');
   return this.schoolCampus;
 };
 
@@ -313,6 +378,18 @@ teacherSchema.statics.countByCampus = function (campusId) {
     status: { $ne: 'archived' } 
   });
 };
+
+teacherSchema.methods.createPasswordResetToken = function() {
+  const resetToken = crypto.randomBytes(32).toString('hex');
+    this.passwordResetToken = crypto
+    .createHash('sha256')
+    .update(resetToken)
+    .digest('hex');
+
+  this.passwordResetExpires = Date.now() + 10 * 60 * 1000;
+
+    return resetToken;
+  };
 
 const Teacher = mongoose.model('Teacher', teacherSchema);
 

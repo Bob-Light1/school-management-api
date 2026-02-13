@@ -1,24 +1,25 @@
 require('dotenv').config();
 
-const formidable = require('formidable');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const GenericEntityController = require('./genericEntity.controller');
 
 const Campus = require('../models/campus.model');
 const Teacher = require('../models/teacher.model');
 const Student = require('../models/student.model');
 const Class = require('../models/class.model');
 
-const { uploadImage, deleteFile } = require('../utils/fileUpload');
+const campusConfig = require('../configs/campus.config');
+const studentConfig = require('../configs/student.config');
+const { uploadImage } = require('../utils/fileUpload');
+
 const {
   sendSuccess,
   sendError,
   sendPaginated,
-  sendCreated,
   sendNotFound,
-  sendConflict,
-  handleDuplicateKeyError
+  sendConflict
 } = require('../utils/responseHelpers');
 const {
   isValidObjectId,
@@ -26,226 +27,248 @@ const {
   validatePasswordStrength
 } = require('../utils/validationHelpers');
 
+// ========================================
+// INITIALIZE GENERIC CONTROLLERS
+// ========================================
+const campusEntityController = new GenericEntityController(campusConfig);
+const studentEntityController = new GenericEntityController(studentConfig);
+
 // Constants
 const JWT_SECRET = process.env.JWT_SECRET;
-const CAMPUS_FOLDER = 'campuses';
 const SALT_ROUNDS = 10;
 
-module.exports = {
+//reusable helper Function for Location
+const parseLocation = (fields) => {
+
+  // Helper to extract values
+  const getField = (bracketPath, objectPath) => {
+    return fields[bracketPath] ?? objectPath(fields);
+  };
+
+  const lat = getField(
+    'location[coordinates][lat]',
+    (f) => f.location?.coordinates?.lat
+  );
+  
+  const lng = getField(
+    'location[coordinates][lng]',
+    (f) => f.location?.coordinates?.lng
+  );
+
+  // Coordinates validation
+  const validateCoordinate = (value, min, max) => {
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) && parsed >= min && parsed <= max 
+      ? parsed 
+      : null;
+  };
+
+  return {
+    address: getField('location[address]', (f) => f.location?.address) || '',
+    city: getField('location[city]', (f) => f.location?.city) || '',
+    country: getField('location[country]', (f) => f.location?.country) || 'Cameroon',
+    coordinates: {
+      lat: validateCoordinate(lat, -90, 90), 
+      lng: validateCoordinate(lng, -180, 180)
+    }
+  };
+};
+
+// ========================================
+// CAMPUS-SPECIFIC CONTROLLER EXTENSIONS
+// ========================================
+
+/**
+ * Extended Campus Controller
+ * Inherits generic CRUD + adds campus-specific methods
+ */
+class CampusController extends GenericEntityController {
+  constructor(config) {
+    super(config);
+  }
 
   /**
-   * Create a new campus
-   * @route   POST /api/campus/create
-   * @access  Private (ADMIN, DIRECTOR)
+   * Override create to handle campus-specific logic
+   * Campus creation is special because:
+   * 1. Campus doesn't belong to another campus
+   * 2. Campus has unique fields (manager_name, campus_name, location)
    */
-  createCampus: async (req, res) => {
-    const form = new formidable.IncomingForm();
-    
-    form.parse(req, async (err, fields, files) => {
-      if (err) {
-        console.error('❌ Form parsing error:', err);
-        return sendError(res, 400, 'Invalid form data');
-      }
+  create = async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-      // Start a session for transaction (ensures data consistency)
-      const session = await mongoose.startSession();
-      session.startTransaction();
+    try {
+      const fields = req.fields || req.body;
+      const files = req.files || {};
 
-      let imagePath = null;
-  
-      try {
-        // Extract and flatten fields
-        const email = fields.email?.[0];
-        const password = fields.password?.[0];
-        const campus_name = fields.campus_name?.[0];
-        const manager_name = fields.manager_name?.[0];
-        const campus_number = fields.campus_number?.[0];
-        const manager_phone = fields.manager_phone?.[0];
-        
-        const location = {
-          address: fields['location[address]']?.[0] || '',
-          city: fields['location[city]']?.[0] || '',
-          country: fields['location[country]']?.[0] || 'Cameroon',
-          coordinates: {
-            lat: fields['location[coordinates][lat]']?.[0] 
-              ? parseFloat(fields['location[coordinates][lat]'][0]) 
-              : null,
-            lng: fields['location[coordinates][lng]']?.[0] 
-              ? parseFloat(fields['location[coordinates][lng]'][0]) 
-              : null,
-          }
-        };
-        
-        // Validate required fields
-        if (!email || !password || !campus_name || !manager_name || !manager_phone) {
-          await session.abortTransaction();
-          return sendError(res, 400, 'All required fields must be provided', {
-            required: ['email', 'password', 'campus_name', 'manager_name']
-          });
-        }
+      // Extract campus-specific fields
+      const {
+        email,
+        password,
+        campus_name,
+        manager_name,
+        campus_number,
+        manager_phone
+      } = fields;
 
-        // Validate email format
-        if (!isValidEmail(email)) {
-          await session.abortTransaction();
-          return sendError(res, 400, 'Invalid email format');
-        }
-
-        // Validate password strength
-        const passwordValidation = validatePasswordStrength(password);
-        if (!passwordValidation.valid) {
-          await session.abortTransaction();
-          return sendError(res, 400, 'Password does not meet requirements', {
-            errors: passwordValidation.errors
-          });
-        }
-  
-        // Check if email already exists (case-insensitive)
-        const existingCampus = await Campus.findOne({ 
-          email: email.toLowerCase() 
-        }).session(session);
-        
-        if (existingCampus) {
-          await session.abortTransaction();
-          return sendConflict(res, 'A campus with this email is already registered');
-        }
-  
-        // Handle image upload
-        const imageFile = files.image?.[0] || files.campus_image?.[0];
-        
-        if (imageFile) {
-          try {
-            imagePath = await uploadImage(imageFile, CAMPUS_FOLDER, 'campus');
-          } catch (uploadError) {
-            await session.abortTransaction();
-            return sendError(res, 400, uploadError.message);
-          }
-        }
-  
-        // Hash password
-        const salt = await bcrypt.genSalt(SALT_ROUNDS);
-        const hashPassword = await bcrypt.hash(password, salt);
-  
-        // Create new campus
-        const newCampus = new Campus({
-          campus_name: campus_name.trim(),
-          campus_number: campus_number?.trim(),
-          email: email.toLowerCase().trim(),
-          manager_name: manager_name.trim(),
-          manager_phone: manager_phone?.trim(),
-          location,
-          password: hashPassword,
-          campus_image: imagePath,
-        });
-  
-        await newCampus.save({ session });
-
-        // Commit transaction
-        await session.commitTransaction();
-        
-        // Remove password from response
-        const response = newCampus.toObject();
-        delete response.password;
-  
-        return sendCreated(res, 'Campus registered successfully', response);
-  
-      } catch (error) {
-        // Rollback transaction on error
+      // Validate required fields
+      if (!email || !password || !campus_name || !manager_name || !manager_phone) {
         await session.abortTransaction();
-        console.error('❌ Campus creation error:', error);
-
-        //cleaning image if DB fails
-        if (imagePath) {
-          await deleteFile(CAMPUS_FOLDER, imagePath); 
-        } 
-        
-        
-        // Handle MongoDB duplicate key errors
-        if (error.code === 11000) {
-          return handleDuplicateKeyError(res, error);
-        }
-
-        // Handle validation errors
-        if (error.name === 'ValidationError') {
-          const messages = Object.values(error.errors).map(err => err.message);
-          return sendError(res, 400, 'Validation failed', { errors: messages });
-        }
-  
-        return sendError(res, 500, 'Failed to register campus. Please try again');
-      } finally {
-        session.endSession();
+        return sendError(res, 400, 'All required fields must be provided', {
+          required: ['email', 'password', 'campus_name', 'manager_name', 'manager_phone']
+        });
       }
-    });
-  },
+
+      // Validate email
+      if (!isValidEmail(email)) {
+        await session.abortTransaction();
+        return sendError(res, 400, 'Invalid email format');
+      }
+
+      // Validate password
+      const passwordValidation = validatePasswordStrength(password);
+      if (!passwordValidation.valid) {
+        await session.abortTransaction();
+        return sendError(res, 400, 'Password does not meet requirements', {
+          errors: passwordValidation.errors
+        });
+      }
+
+      // Check uniqueness
+      const existingCampus = await Campus.findOne({
+        email: email.toLowerCase()
+      }).session(session);
+
+      if (existingCampus) {
+        await session.abortTransaction();
+        return sendConflict(res, 'A campus with this email is already registered');
+      }
+
+      // Handle location
+      const location = parseLocation(fields);
+      
+      // Handle image
+      profileImage = await uploadImage(imageFile, this.folderName, 'campus');
+
+      // Hash password
+      const salt = await bcrypt.genSalt(SALT_ROUNDS);
+      const hashedPassword = await bcrypt.hash(password, salt);
+
+      // Create campus
+      const campusData = {
+        campus_name: campus_name.trim(),
+        campus_number: campus_number?.trim(),
+        email: email.toLowerCase().trim(),
+        manager_name: manager_name.trim(),
+        manager_phone: manager_phone?.trim(),
+        location,
+        password: hashedPassword,
+        profileImage // For compatibility with generic controller
+      };
+
+      const campus = new Campus(campusData);
+      const savedCampus = await campus.save({ session });
+
+      await session.commitTransaction();
+
+      // After create hook
+      if (this.afterCreate) {
+        await this.afterCreate(savedCampus);
+      }
+
+      // Return without password
+      const response = savedCampus.toObject();
+      delete response.password;
+
+      const { sendCreated } = require('../utils/responseHelpers');
+      return sendCreated(res, 'Campus registered successfully', response);
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('❌ Campus creation error:', error);
+
+      const { handleDuplicateKeyError } = require('../utils/responseHelpers');
+      if (error.code === 11000) {
+        return handleDuplicateKeyError(res, error);
+      }
+
+      if (error.name === 'ValidationError') {
+        const messages = Object.values(error.errors).map(err => err.message);
+        return sendError(res, 400, 'Validation failed', { errors: messages });
+      }
+
+      return sendError(res, 500, 'Failed to register campus. Please try again');
+    } finally {
+      session.endSession();
+    }
+  };
 
   /**
-   * Campus login
+   * Campus Login
    * @route   POST /api/campus/login
    * @access  Public
    */
-  loginCampus: async (req, res) => {
+  login = async (req, res) => {
     try {
-      // Validate request body
       if (!req.body || !req.body.email || !req.body.password) {
         return sendError(res, 400, 'Email and password are required');
       }
-  
+
       const { email, password } = req.body;
-  
-      // JWT_SECRET verification
+
       if (!JWT_SECRET) {
-        console.error('❌ JWT_SECRET is not defined in environment variables');
+        console.error('❌ JWT_SECRET is not defined');
         return sendError(res, 500, 'Server configuration error');
       }
 
-      // Validate email format
       if (!isValidEmail(email)) {
         return sendError(res, 400, 'Invalid email format');
       }
-  
-      // Find campus with password field
-      const campus = await Campus.findOne({ 
-        email: email.toLowerCase().trim() 
+
+      // Find campus with password
+      const campus = await Campus.findOne({
+        email: email.toLowerCase().trim()
       }).select('+password');
-      
-      // Generic error message for security
+
       if (!campus) {
         return sendError(res, 401, 'Invalid email or password');
       }
-  
-      // Compare password
+
+      // Verify password
       const isPasswordValid = await bcrypt.compare(password, campus.password);
-  
+
       if (!isPasswordValid) {
         return sendError(res, 401, 'Invalid email or password');
       }
 
-      // Check campus status
+      // Check status
       if (campus.status !== 'active') {
         return sendError(res, 403, 'This campus account is inactive. Please contact support.');
       }
-  
-      // Generate JWT token
+
+      // Generate token
       const token = jwt.sign(
         {
           id: campus._id,
           campusId: campus._id,
           manager_name: campus.manager_name,
           campus_name: campus.campus_name,
-          image_url: campus.campus_image,
+          image_url: campus.campus_image || campus.profileImage,
           role: 'CAMPUS_MANAGER'
         },
         JWT_SECRET,
-        { 
+        {
           expiresIn: '7d',
-          issuer: 'school-management-app',
+          issuer: 'school-management-app'
         }
       );
-  
-      // Update last login time
-      campus.lastLogin = new Date();
-      await campus.save();
-  
-      // Send response
+
+      // Update last login
+      Campus.updateOne(
+        { _id: campus._id },
+        { $set: { lastLogin: new Date() } }
+      ).catch(err => console.error('Failed to update lastLogin:', err));; 
+
       return sendSuccess(res, 200, 'Login successful', {
         token,
         user: {
@@ -253,35 +276,33 @@ module.exports = {
           manager_name: campus.manager_name,
           campus_name: campus.campus_name,
           email: campus.email,
-          image_url: campus.campus_image,
+          image_url: campus.campus_image || campus.profileImage,
           role: 'CAMPUS_MANAGER'
         }
       });
-  
+
     } catch (error) {
       console.error('❌ Campus login error:', error);
       return sendError(res, 500, 'Internal server error during login');
     }
-  },
+  };
 
   /**
-   * Get all campuses with pagination and filters
-   * @route   GET /api/campus/all
-   * @access  Private (ADMIN, DIRECTOR)
+   * Override getAll to handle campus-specific filters
    */
-  getAllCampus: async (req, res) => {
+  getAll = async (req, res) => {
     try {
-      const { 
-        page = 1, 
-        limit = 50, 
+      const {
+        page = 1,
+        limit = 50,
         search = '',
         status,
-        city 
+        city
       } = req.query;
 
       // Build filter
       const filter = {};
-      
+
       if (status) {
         filter.status = status;
       }
@@ -301,13 +322,12 @@ module.exports = {
 
       const skip = (Number(page) - 1) * Number(limit);
 
-      // Fetch campuses with pagination
-      const allCampus = await Campus.find(filter)
+      const campuses = await Campus.find(filter)
         .select('-password')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
-        .lean(); // Use lean() for better performance (returns plain JS objects)
+        .lean();
 
       const total = await Campus.countDocuments(filter);
 
@@ -315,7 +335,7 @@ module.exports = {
         res,
         200,
         'All campuses fetched successfully',
-        allCampus,
+        campuses,
         { total, page, limit }
       );
 
@@ -323,185 +343,22 @@ module.exports = {
       console.error('❌ Error fetching campuses:', error);
       return sendError(res, 500, 'Internal server error while fetching campuses');
     }
-  },
+  };
 
   /**
-   * Get single campus by ID
-   * @route   GET /api/campus/:id
-   * @access  Private (CAMPUS_MANAGER can only access own campus, ADMIN/DIRECTOR all)
-   */
-  getOneCampus: async (req, res) => {
-    try {
-      const { id } = req.params;
-  
-      // Validate ObjectId
-      if (!isValidObjectId(id)) {
-        return sendError(res, 400, 'Invalid campus ID format');
-      }
-
-      // Authorization: CAMPUS_MANAGER can only access their own campus
-      if (req.user.role === 'CAMPUS_MANAGER' && req.user.campusId !== id) {
-        return sendError(res, 403, 'You can only access your own campus');
-      }
-  
-      const campus = await Campus.findById(id).select('-password').lean();
-  
-      if (!campus) {
-        return sendNotFound(res, 'Campus');
-      }
-  
-      return sendSuccess(res, 200, 'Campus fetched successfully', campus);
-  
-    } catch (error) {
-      console.error('❌ getOneCampus error:', error);
-      return sendError(res, 500, 'Server error');
-    }
-  },
-
-  /**
-   * Update campus information
-   * @route   PUT /api/campus/:id
-   * @access  Private (CAMPUS_MANAGER for own campus, ADMIN/DIRECTOR for all)
-   */
-  updateCampus: async (req, res) => {
-    const form = new formidable.IncomingForm();
-    
-    form.parse(req, async (err, fields, files) => {
-      if (err) {
-        console.error('❌ Formidable error:', err);
-        return sendError(res, 400, 'Error processing the form');
-      }
-  
-      try {
-        const id = req.params.id;
-
-        // Validate ObjectId
-        if (!isValidObjectId(id)) {
-          return sendError(res, 400, 'Invalid campus ID format');
-        }
-  
-        // Check if campus exists
-        const campus = await Campus.findById(id);
-        if (!campus) {
-          return sendNotFound(res, 'Campus');
-        }
-
-        // Authorization check
-        if (req.user.role === 'CAMPUS_MANAGER') {
-          if (req.user.campusId !== id) {
-            return sendError(res, 403, 'You can only update your own campus');
-          }
-        } else if (!['ADMIN', 'DIRECTOR'].includes(req.user.role)) {
-          return sendError(res, 403, 'You are not authorized to update campuses');
-        }
-
-        // Check email uniqueness if email is being changed
-        const newEmail = fields.email?.[0];
-        if (newEmail && newEmail.toLowerCase() !== campus.email) {
-          if (!isValidEmail(newEmail)) {
-            return sendError(res, 400, 'Invalid email format');
-          }
-
-          const emailExists = await Campus.findOne({ 
-            email: newEmail.toLowerCase(),
-            _id: { $ne: id }
-          });
-          
-          if (emailExists) {
-            return sendConflict(res, 'This email is already in use by another campus');
-          }
-        }
-  
-        // Handle image upload
-        const imageFile = files.image?.[0] || files.campus_image?.[0];
-        
-        if (imageFile) {
-          try {
-            // Upload new image
-            const newImagePath = await uploadImage(imageFile, CAMPUS_FOLDER, 'campus');
-            
-            // Delete old image if exists
-            if (campus.campus_image) {
-              await deleteFile(CAMPUS_FOLDER, campus.campus_image);
-            }
-            
-            campus.campus_image = newImagePath;
-          } catch (uploadError) {
-            return sendError(res, 400, uploadError.message);
-          }
-        }
-  
-        // Update allowed fields
-        const allowedUpdates = [
-          'campus_name', 
-          'manager_name', 
-          'manager_phone',
-          'email', 
-          'campus_number'
-        ];
-        
-        allowedUpdates.forEach((field) => {
-          const value = fields[field]?.[0];
-          if (value !== undefined && value !== null && value !== '') {
-            campus[field] = field === 'email' 
-              ? value.toLowerCase().trim() 
-              : value.trim();
-          }
-        });
-
-        // Update location if provided
-        if (fields['location[address]']?.[0]) {
-          campus.location.address = fields['location[address]'][0];
-        }
-        if (fields['location[city]']?.[0]) {
-          campus.location.city = fields['location[city]'][0];
-        }
-        if (fields['location[country]']?.[0]) {
-          campus.location.country = fields['location[country]'][0];
-        }
-  
-        // Save updated campus
-        await campus.save();
-  
-        // Prepare response without password
-        const updatedData = campus.toObject();
-        delete updatedData.password;
-  
-        return sendSuccess(res, 200, 'Campus updated successfully', updatedData);
-  
-      } catch (error) {
-        console.error('❌ Error in updateCampus:', error);
-
-        if (error.code === 11000) {
-          return handleDuplicateKeyError(res, error);
-        }
-
-        if (error.name === 'ValidationError') {
-          const messages = Object.values(error.errors).map(err => err.message);
-          return sendError(res, 400, 'Validation failed', { errors: messages });
-        }
-
-        return sendError(res, 500, 'Error updating campus');
-      }
-    });
-  },
-
-  /**
-   * Update campus password
+   * Update Campus Password
    * @route   PATCH /api/campus/:id/password
-   * @access  Private (CAMPUS_MANAGER for own campus, ADMIN)
+   * @access  Private
    */
-  updateCampusPassword: async (req, res) => {
+  updatePassword = async (req, res) => {
     try {
       const { id } = req.params;
       const { currentPassword, newPassword } = req.body;
 
-      // Validate ObjectId
       if (!isValidObjectId(id)) {
         return sendError(res, 400, 'Invalid campus ID format');
       }
 
-      // Validate required fields
       if (!newPassword) {
         return sendError(res, 400, 'New password is required');
       }
@@ -522,7 +379,7 @@ module.exports = {
         return sendError(res, 403, 'You are not authorized to change this password');
       }
 
-      // Find campus with password
+      // Find campus
       const campus = await Campus.findById(id).select('+password');
       if (!campus) {
         return sendNotFound(res, 'Campus');
@@ -552,70 +409,38 @@ module.exports = {
       console.error('❌ Password update error:', error);
       return sendError(res, 500, 'Failed to update password');
     }
-  },
+  };
 
   /**
-   * Archive campus (soft delete)
-   * @route   DELETE /api/campus/:id
-   * @access  Private (ADMIN, DIRECTOR only)
-   */
-  deleteCampus: async (req, res) => {
-    try {
-      const { id } = req.params;
-
-      // Validate ObjectId
-      if (!isValidObjectId(id)) {
-        return sendError(res, 400, 'Invalid campus ID format');
-      }
-
-      const campus = await Campus.findById(id);
-      if (!campus) {
-        return sendNotFound(res, 'Campus');
-      }
-
-      // Soft delete (update status to 'archived')
-      campus.status = 'archived';
-      await campus.save();
-
-      return sendSuccess(res, 200, 'Campus archived successfully');
-
-    } catch (error) {
-      console.error('❌ Error deleting campus:', error);
-      return sendError(res, 500, 'Failed to archive campus');
-    }
-  },
-
-  /**
-   * Get campus context with statistics
+   * Get Campus Context with Statistics
    * @route   GET /api/campus/:campusId/context
    * @access  Private
    */
-  getCampusContext: async (req, res) => {
+  getContext = async (req, res) => {
     try {
       const { campusId } = req.params;
 
-      // Validate ObjectId
       if (!isValidObjectId(campusId)) {
         return sendError(res, 400, 'Invalid campus ID format');
       }
 
-      // Authorization check
-      if (req.user.role === 'CAMPUS_MANAGER' && req.user.campusId !== campusId) {
+      // Authorization
+      if (req.user.role === 'CAMPUS_MANAGER' && (req.user.campusId).toString() !== (campusId).toString()) {
         return sendError(res, 403, 'You can only access your own campus context');
       }
-  
-      // Parallel queries for better performance
+
+      // Parallel queries
       const [campus, studentsCount, teachersCount, classesCount] = await Promise.all([
         Campus.findById(campusId).select('-password').lean(),
         Student.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
         Teacher.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
-        Class.countDocuments({ campus: campusId, status: { $ne: 'archived' } })
+        Class.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } })
       ]);
-  
+
       if (!campus) {
         return sendNotFound(res, 'Campus');
       }
-  
+
       return sendSuccess(res, 200, 'Campus context fetched successfully', {
         campus,
         stats: {
@@ -628,25 +453,23 @@ module.exports = {
       console.error('❌ getCampusContext error:', error);
       return sendError(res, 500, 'Failed to fetch campus context');
     }
-  },
+  };
 
   /**
-   * Get campus dashboard statistics
+   * Get Campus Dashboard Statistics
    * @route   GET /api/campus/:campusId/dashboard
-   * @access  Private (CAMPUS_MANAGER, DIRECTOR, ADMIN)
+   * @access  Private
    */
-  getCampusDashboardStats: async (req, res) => {
+  getDashboardStats = async (req, res) => {
     try {
       const { campusId } = req.params;
 
-      
-      // Validate ObjectId
-     if (!mongoose.Types.ObjectId.isValid(campusId)) {
+      if (!isValidObjectId(campusId)) {
         return sendError(res, 400, 'Invalid campus ID format');
       }
 
       // Authorization
-      if (req.user.role === 'CAMPUS_MANAGER' && req.user.campusId !== campusId) {
+      if (req.user.role === 'CAMPUS_MANAGER' && (req.user.campusId).toString() !== campusId.toString()) {
         return sendError(res, 403, 'You can only access your own campus dashboard');
       }
 
@@ -662,8 +485,8 @@ module.exports = {
       ] = await Promise.all([
         Student.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
         Teacher.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
-        Class.countDocuments({ campus: campusId, status: { $ne: 'archived' } }),
-        Class.countDocuments({ campus: campusId, status: 'active' }),
+        Class.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
+        Class.countDocuments({ schoolCampus: campusId, status: 'active' }),
         Student.countDocuments({
           schoolCampus: campusId,
           createdAt: { $gte: firstDayOfMonth },
@@ -695,19 +518,18 @@ module.exports = {
       console.error('❌ Dashboard stats error:', error);
       return sendError(res, 500, 'Failed to load dashboard statistics');
     }
-  },
+  };
 
   /**
-   * Get students of a campus
+   * Get Campus Students (with filters)
    * @route   GET /api/campus/:campusId/students
    * @access  Private
    */
-  getCampusStudents: async (req, res) => {
+  getStudents = async (req, res) => {
     try {
       const { campusId } = req.params;
       const { page = 1, limit = 20, search = '', classId, status } = req.query;
 
-      // Validate ObjectId
       if (!isValidObjectId(campusId)) {
         return sendError(res, 400, 'Invalid campus ID format');
       }
@@ -752,22 +574,21 @@ module.exports = {
       );
 
     } catch (error) {
-      console.error('❌ getCampusStudents error:', error);
+      console.error('❌ getStudents error:', error);
       return sendError(res, 500, 'Failed to fetch students');
     }
-  },
+  };
 
   /**
-   * Get teachers of a campus
+   * Get Campus Teachers
    * @route   GET /api/campus/:campusId/teachers
    * @access  Private
    */
-  getCampusTeachers: async (req, res) => {
+  getTeachers = async (req, res) => {
     try {
       const { campusId } = req.params;
       const { page = 1, limit = 20, search = '', status } = req.query;
 
-      // Validate ObjectId
       if (!isValidObjectId(campusId)) {
         return sendError(res, 400, 'Invalid campus ID format');
       }
@@ -808,22 +629,21 @@ module.exports = {
       );
 
     } catch (error) {
-      console.error('❌ getCampusTeachers error:', error);
+      console.error('❌ getTeachers error:', error);
       return sendError(res, 500, 'Failed to fetch teachers');
     }
-  },
+  };
 
   /**
-   * Get classes of a campus
+   * Get Campus Classes
    * @route   GET /api/campus/:campusId/classes
    * @access  Private
    */
-  getCampusClasses: async (req, res) => {
+  getClasses = async (req, res) => {
     try {
       const { campusId } = req.params;
       const { status } = req.query;
 
-      // Validate ObjectId
       if (!isValidObjectId(campusId)) {
         return sendError(res, 400, 'Invalid campus ID format');
       }
@@ -844,8 +664,37 @@ module.exports = {
       return sendSuccess(res, 200, 'Classes fetched successfully', classes);
 
     } catch (error) {
-      console.error('❌ getCampusClasses error:', error);
+      console.error('❌ getClasses error:', error);
       return sendError(res, 500, 'Failed to fetch classes');
     }
-  }
+  };
+}
+
+// ========================================
+// INSTANTIATE CONTROLLERS
+// ========================================
+const campusController = new CampusController(campusConfig);
+
+// ========================================
+// EXPORT CONTROLLER METHODS
+// ========================================
+module.exports = {
+  // Generic CRUD operations (inherited)
+  createCampus: campusController.create,
+  getAllCampus: campusController.getAll,
+  getOneCampus: campusController.getOne,
+  updateCampus: campusController.update,
+  deleteCampus: campusController.archive,
+
+  // Campus-specific operations
+  loginCampus: campusController.login,
+  updateCampusPassword: campusController.updatePassword,
+  getCampusContext: campusController.getContext,
+  getCampusDashboardStats: campusController.getDashboardStats,
+  getCampusStudents: campusController.getStudents,
+  getCampusTeachers: campusController.getTeachers,
+  getCampusClasses: campusController.getClasses,
+
+  // Statistics (using student controller)
+  getCampusStudentsStats: studentEntityController.getStats
 };

@@ -1,4 +1,4 @@
-const formidable = require('formidable');
+const { formidable } = require('formidable');
 
 /**
  * Middleware to parse multipart/form-data

@@ -56,9 +56,13 @@ exports.createClass = async (req, res) => {
         return sendError(res, 400, 'Invalid class manager ID format');
       }
 
-      const isValid = await validateTeacherBelongsToCampus(classManager, schoolCampus);
-      if (!isValid) {
-        return sendError(res, 400, 'Class manager must belong to the same campus');
+      const teacher = await Teacher.findOne({
+        _id: classManager,
+        schoolCampus: schoolCampus
+      }).select('_id');
+      
+      if (!teacher) {
+        return sendError(res, 400, 'Teacher not found or does not belong to campus');
       }
     }
 
@@ -140,13 +144,15 @@ exports.getAllClass = async (req, res) => {
     // Build campus filter based on user role
     const filter = buildCampusFilter(req.user, campusId);
 
+    if (includeArchived !== 'true') {
+      filter.status = { $ne: 'archived' };
+    } else if (status) {
+      filter.status = status;
+    }
+
     // Additional filters
     if (level && isValidObjectId(level)) {
       filter.level = level;
-    }
-
-    if (status) {
-      filter.status = status;
     }
 
     // Search by class name

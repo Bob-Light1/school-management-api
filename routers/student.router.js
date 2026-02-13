@@ -2,9 +2,13 @@ const express = require('express');
 const router = express.Router();
 
 const studentController = require('../controllers/student.controller');
-const parseFormData = require('../middleware/formidable/formidable');
 const { authenticate, authorize, isOwnerOrRole } = require('../middleware/auth/auth');
 const { loginLimiter, apiLimiter } = require('../middleware/rate-limiter/rate-limiter');
+const { 
+  uploadProfileImage,
+  uploadDocument,
+  handleMulterError 
+} = require('../middleware/upload/upload');
 
 // ========================================
 // PUBLIC ROUTES (No Authentication)
@@ -36,7 +40,8 @@ router.use(authenticate);
 router.post(
   '/',
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
-  parseFormData(), // Parse multipart/form-data for image upload
+  uploadProfileImage,
+  handleMulterError,
   studentController.createStudent
 );
 
@@ -80,7 +85,8 @@ router.get(
 router.put(
   '/:id',
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
-  parseFormData(), // Parse multipart/form-data for image upload
+  uploadProfileImage,    //Optional profile image update
+  handleMulterError,
   studentController.updateStudent
 );
 
@@ -135,6 +141,123 @@ router.delete(
   '/:id/permanent',
   authorize(['ADMIN']),
   studentController.deleteStudentPermanently
+);
+
+// ========================================
+// BULK OPERATIONS
+// ========================================
+
+/**
+ * @route   POST /api/students/bulk/change-class
+ * @desc    Change class for multiple students
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ * @note    Allow user to select many students and put them in a new class
+ */
+router.post(
+  '/bulk/change-class',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.bulkChangeClass
+);
+
+/**
+ * @route   POST /api/students/bulk/email
+ * @desc    Send email to many students
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ * @note    Allow user to send many emails to many students at once
+ */
+router.post(
+  '/bulk/email',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.bulkSendEmail
+);
+
+/**
+ * @route   POST /api/students/bulk/archive
+ * @desc    Archive many students at once
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ * @note    Allow user to select many students and archive them
+ */
+router.post(
+  '/bulk/archive',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.bulkArchive
+);
+
+// ========================================
+// IMPORT/EXPORT OPERATIONS
+// ========================================
+
+/**
+ * @route   GET /api/students/export/csv
+ * @desc    Export student information to CSV
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  '/export/csv',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.exportToCSV
+);
+
+
+/**
+ * @route   GET /api/students/export/excel
+ * @desc    Export student information to Excel
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  '/export/excel',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.exportToExcel
+);
+
+/**
+ * @route   GET /api/students/export
+ * @desc    Alias for backward compatibility
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  '/export',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  studentController.exportToCSV
+);
+
+/**
+ * @route   POST /api/students/import
+ * @desc    Import student information from CSV/Excel
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.post(
+  '/import',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadDocument,        // Upload CSV/Excel file
+  handleMulterError,
+  studentController.importFromFile
+);
+
+/**
+ * @route   POST /api/students/template/csv
+ * @desc    Import CSV template
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.post(
+  '/import/template/csv',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadDocument,        // Upload CSV file
+  handleMulterError,
+  studentController.getImportTemplateCSV
+);
+
+/**
+ * @route   POST /api/students/template/excel
+ * @desc    Import Excel template
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.post(
+  '/import/template/excel',
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
+  uploadDocument,        // Upload Excel file
+  handleMulterError,
+  studentController.getImportTemplateExcel
 );
 
 module.exports = router;
