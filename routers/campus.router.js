@@ -13,7 +13,11 @@ const {
   getCampusTeachers,
   getCampusStudents,
   getCampusDashboardStats,
-  getCampusStudentsStats
+  getCampusStudentsStats,
+  getCampusDepartments,
+  getCampusMentors,
+  getCampusPartners,
+  getCampusParents
 } = require('../controllers/campus.controller');
 
 const { authenticate, authorize } = require('../middleware/auth/auth');
@@ -169,14 +173,57 @@ router.get(
 );
 
 /**
- * @route   GET /api/campus/:id/classes
+ * @route   GET /api/campus/:campusId/parents
+ * @desc    Get all parents in a campus
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  "/:campusId/parents", 
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
+  getCampusParents
+);
+
+/**
+ * @route   GET /api/campus/:campusId/mentors
+ * @desc    Get all mentors in a specific campus
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  "/:campusId/mentors", 
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
+  getCampusMentors
+);
+
+/**
+ * @route   GET /api/campus/:campusId/partners
+ * @desc    Get all partners from a specific campus
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  "/:campusId/partners", 
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
+  getCampusPartners
+);
+
+/**
+ * @route   GET /api/campus/:campusId/classes
  * @desc    Get all classes in a campus
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
  */
 router.get(
-  "/:id/classes", 
+  "/:campusId/classes", 
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
   getCampusClasses
+);
+
+/**
+ * @route   GET /api/campus/:campusId/departments
+ * @desc    Get all departments in specific campus
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  "/:campusId/departments",
+  getCampusDepartments
 );
 
 /**
@@ -186,7 +233,7 @@ router.get(
  * @note    Administration should be able to see directly all important statistics
  */
 router.get(
-  '/:campusId/students/stats', 
+  "/:campusId/students/stats", 
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
   getCampusStudentsStats
 );

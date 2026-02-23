@@ -9,6 +9,7 @@ const Campus = require('../models/campus.model');
 const Teacher = require('../models/teacher.model');
 const Student = require('../models/student.model');
 const Class = require('../models/class.model');
+const Department = require('../models/department.model');
 
 const campusConfig = require('../configs/campus.config');
 const studentConfig = require('../configs/student.config');
@@ -672,6 +673,184 @@ class CampusController extends GenericEntityController {
   };
 
   /**
+   * Get Campus Parents
+   * @route   GET /api/campus/:campusId/parents
+   * @access  Private (ADMIN, DIRECTOR, CAMPUS_MANAGER)
+   */
+  getParents = async (req, res) => {
+    try {
+      const { campusId } = req.params;
+      const { page = 1, limit = 20, search = '', status } = req.query;
+
+      if (!isValidObjectId(campusId)) {
+        return sendError(res, 400, 'Invalid campus ID format');
+      }
+
+      if (
+        req.user.role === 'CAMPUS_MANAGER' &&
+        req.user.campusId.toString() !== campusId.toString()
+      ) {
+        return sendError(res, 403, 'You can only access parents from your own campus');
+      }
+
+      const Parent = mongoose.model('Parent');
+
+      const filter = { schoolCampus: campusId };
+      if (status) filter.status = status;
+      else filter.status = { $ne: 'archived' };
+
+      if (search) {
+        filter.$or = [
+          { firstName: { $regex: search, $options: 'i' } },
+          { lastName:  { $regex: search, $options: 'i' } },
+          { email:     { $regex: search, $options: 'i' } },
+          { phone:     { $regex: search, $options: 'i' } },
+          { matricule: { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      const skip = (Number(page) - 1) * Number(limit);
+
+      const [parents, total] = await Promise.all([
+        Parent.find(filter)
+          .populate('children', 'firstName lastName matricule')
+          .select('-password')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(Number(limit))
+          .lean(),
+        Parent.countDocuments(filter),
+      ]);
+
+      return sendPaginated(res, 200, 'Parents fetched successfully', parents, {
+        total, page, limit,
+      });
+    } catch (error) {
+      console.error('❌ getParents error:', error);
+      return sendError(res, 500, 'Failed to fetch parents');
+    }
+  };
+
+/**
+   * Get Campus Mentors
+   * @route   GET /api/campus/:campusId/mentors
+   * @access  Private (ADMIN, DIRECTOR, CAMPUS_MANAGER)
+   */
+  getMentors = async (req, res) => {
+    try {
+      const { campusId } = req.params;
+      const { page = 1, limit = 20, search = '', status } = req.query;
+
+      if (!isValidObjectId(campusId)) {
+        return sendError(res, 400, 'Invalid campus ID format');
+      }
+
+      if (
+        req.user.role === 'CAMPUS_MANAGER' &&
+        req.user.campusId.toString() !== campusId.toString()
+      ) {
+        return sendError(res, 403, 'You can only access mentors from your own campus');
+      }
+
+      const Mentor = mongoose.model('Mentor');
+
+      const filter = { schoolCampus: campusId };
+      if (status) filter.status = status;
+      else filter.status = { $ne: 'archived' };
+
+      if (search) {
+        filter.$or = [
+          { firstName:      { $regex: search, $options: 'i' } },
+          { lastName:       { $regex: search, $options: 'i' } },
+          { email:          { $regex: search, $options: 'i' } },
+          { phone:          { $regex: search, $options: 'i' } },
+          { specialization: { $regex: search, $options: 'i' } },
+          { matricule:      { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      const skip = (Number(page) - 1) * Number(limit);
+
+      const [mentors, total] = await Promise.all([
+        Mentor.find(filter)
+          .populate('assignedStudents', 'firstName lastName matricule')
+          .select('-password')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(Number(limit))
+          .lean(),
+        Mentor.countDocuments(filter),
+      ]);
+
+      return sendPaginated(res, 200, 'Mentors fetched successfully', mentors, {
+        total, page, limit,
+      });
+    } catch (error) {
+      console.error('❌ getMentors error:', error);
+      return sendError(res, 500, 'Failed to fetch mentors');
+    }
+  };
+
+  /**
+   * Get Campus Partners
+   * @route   GET /api/campus/:campusId/partners
+   * @access  Private (ADMIN, DIRECTOR, CAMPUS_MANAGER)
+   * @query   type — optional filter on partner type (e.g. 'company', 'ngo'…)
+   */
+  getPartners = async (req, res) => {
+    try {
+      const { campusId } = req.params;
+      const { page = 1, limit = 20, search = '', status, type } = req.query;
+
+      if (!isValidObjectId(campusId)) {
+        return sendError(res, 400, 'Invalid campus ID format');
+      }
+
+      if (
+        req.user.role === 'CAMPUS_MANAGER' &&
+        req.user.campusId.toString() !== campusId.toString()
+      ) {
+        return sendError(res, 403, 'You can only access partners from your own campus');
+      }
+
+      const Partner = mongoose.model('Partner');
+
+      const filter = { schoolCampus: campusId };
+      if (status) filter.status = status;
+      else filter.status = { $ne: 'archived' };
+      if (type) filter.type = type;
+
+      if (search) {
+        filter.$or = [
+          { name:         { $regex: search, $options: 'i' } },
+          { email:        { $regex: search, $options: 'i' } },
+          { phone:        { $regex: search, $options: 'i' } },
+          { organization: { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      const skip = (Number(page) - 1) * Number(limit);
+
+      const [partners, total] = await Promise.all([
+        Partner.find(filter)
+          .select('-password')
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(Number(limit))
+          .lean(),
+        Partner.countDocuments(filter),
+      ]);
+
+      return sendPaginated(res, 200, 'Partners fetched successfully', partners, {
+        total, page, limit,
+      });
+    } catch (error) {
+      console.error('❌ getPartners error:', error);
+      return sendError(res, 500, 'Failed to fetch partners');
+    }
+  };
+
+  /**
    * Get Campus Classes
    * @route   GET /api/campus/:campusId/classes
    * @access  Private
@@ -705,6 +884,54 @@ class CampusController extends GenericEntityController {
       return sendError(res, 500, 'Failed to fetch classes');
     }
   };
+
+  /**
+   * Get Campus Departments
+   * @route   GET /api/campus/:campusId/departments
+   * @access  Private (ADMIN, DIRECTOR, CAMPUS_MANAGER, TEACHER)
+   * @query   includeArchived — 'true' to include archived departments
+   */
+  getDepartments = async (req, res) => {
+    try {
+      const { campusId } = req.params;
+      const { search = '', status, includeArchived } = req.query;
+
+      if (!isValidObjectId(campusId)) {
+        return sendError(res, 400, 'Invalid campus ID format');
+      }
+
+      if (
+        req.user.role === 'CAMPUS_MANAGER' &&
+        req.user.campusId.toString() !== campusId.toString()
+      ) {
+        return sendError(res, 403, 'You can only access departments from your own campus');
+      }
+
+      const Department = mongoose.model('Department');
+
+      const filter = { schoolCampus: campusId };
+      if (status) filter.status = status;
+      else if (includeArchived !== 'true') filter.status = { $ne: 'archived' };
+
+      if (search) {
+        filter.$or = [
+          { name:        { $regex: search, $options: 'i' } },
+          { code:        { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } },
+        ];
+      }
+
+      const departments = await Department.find(filter)
+        .populate('headOfDepartment', 'firstName lastName email')
+        .sort({ name: 1 })
+        .lean();
+
+      return sendSuccess(res, 200, 'Departments fetched successfully', departments);
+    } catch (error) {
+      console.error('❌ getDepartments error:', error);
+      return sendError(res, 500, 'Failed to fetch departments');
+    }
+  };
 }
 
 // ========================================
@@ -730,6 +957,10 @@ module.exports = {
   getCampusDashboardStats: campusController.getDashboardStats,
   getCampusStudents: campusController.getStudents,
   getCampusTeachers: campusController.getTeachers,
+  getCampusParents: campusController.getParents,
+  getCampusPartners: campusController.getPartners,
+  getCampusMentors: campusController.getMentors,
+  getCampusDepartments: campusController.getDepartments,
   getCampusClasses: campusController.getClasses,
 
   // Statistics (using student controller)

@@ -1,12 +1,12 @@
 const mongoose = require("mongoose");
 
 /**
- * Schedule Schema
- * Represents a class timetable entry.
+ * Parent Schema
+ * Represents a parent or legal guardian of one or more students.
  */
-const scheduleSchema = new mongoose.Schema(
+const partnerSchema = new mongoose.Schema(
   {
-    // Campus where the schedule applies
+    // Campus linked to the parent account
     schoolCampus: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "SchoolCampus",
@@ -14,105 +14,89 @@ const scheduleSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Class concerned by the schedule
-    class: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Classes",
-      required: true,
-      index: true,
-    },
-
-    // Subject being taught
-    subject: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Subject",
-      required: true,
-    },
-
-    // Teacher assigned to the class
-    teacher: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Teacher",
-      required: true,
-      index: true,
-    },
-
-    // Day of the week
-    dayOfWeek: {
+  
+    // Personal information
+    name: {
       type: String,
-      enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
       required: true,
-      index: true,
-    },
-
-    // Start time of the course
-    startTime: {
-      type: String, // HH:mm format
-      required: true,
-    },
-
-    // End time of the course
-    endTime: {
-      type: String, // HH:mm format
-      required: true,
-    },
-
-    // Optional classroom or room number
-    room: {
-      type: String,
       trim: true,
     },
 
-    // Academic year (e.g. 2024-2025)
-    academicYear: {
+    surname: {
       type: String,
       required: true,
+      trim: true,
+    },
+
+    username: {
+      type: String,
+      required: true,
+      unique: true,
+      lowercase: true,
+      trim: true,
       index: true,
     },
 
-    // Semester
-    semester: {
+    email: {
       type: String,
-      enum: ["S1", "S2", "Annuel"],
+      lowercase: true,
+      trim: true,
+      unique: true,
+      sparse: true, // allows multiple null emails
+    },
+
+    gender: {
+      type: String,
+      enum: ["Male", "Female"],
       required: true,
     },
 
-    // Schedule status
+    phone: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+
+    address: {
+      type: String,
+      required: true,
+      maxlength: 300,
+    },
+
+    // Authentication
+    password: {
+      type: String,
+      required: true,
+      select: false,
+    },
+
+    // Account status
     status: {
       type: String,
-      enum: ["active", "cancelled"],
+      enum: ["active", "suspended"],
       default: "active",
       index: true,
+    },
+
+    // Last login timestamp
+    lastLoginAt: {
+      type: Date,
     },
   },
   {
     timestamps: true, // createdAt & updatedAt
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
   }
 );
 
 /**
- * Validate that startTime is before endTime
+ * Virtual field to get full name
  */
-scheduleSchema.pre("save", function (next) {
-  if (this.startTime >= this.endTime) {
-    return next(new Error("Start time must be before end time"));
-  }
-  next();
+partnerSchema.virtual("fullName").get(function () {
+  return `${this.name} ${this.surname}`;
 });
 
-/**
- * Prevent duplicate schedules for the same class and time slot
- */
-scheduleSchema.index(
-  {
-    class: 1,
-    dayOfWeek: 1,
-    startTime: 1,
-    endTime: 1,
-    academicYear: 1,
-    semester: 1,
-  },
-  { unique: true }
-);
-
-module.exports = mongoose.model("Schedule", scheduleSchema);
+module.exports = mongoose.model("Parter", partnerSchema);
+ 
