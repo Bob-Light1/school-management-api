@@ -38,11 +38,11 @@ class GenericEntityController {
     this.afterUpdate = config.afterUpdate || null;
     this.statsFacets = config.statsFacets || null;
     this.statsFormatter = config.statsFormatter || null;
+    this.buildExtraFilters = config.buildExtraFilters || null;
   }
 
   /**
    * CREATE ENTITY
-   * ✅ Migrated to Multer
    */
   create = async (req, res) => {
     const session = await mongoose.startSession();
@@ -205,14 +205,20 @@ class GenericEntityController {
       
       const filter = buildCampusFilter(req.user, campusId);
   
-      if (classId) filter.studentClass = classId;
-      if (includeArchived !== 'true') {
+     if (this.buildExtraFilters) {
+        const extraFilters = this.buildExtraFilters(req.query);
+        Object.assign(filter, extraFilters);
+      }
+      
+     if (includeArchived !== 'true') {
         filter.status = { $ne: 'archived' };
-      } else if (status) {
+      }
+
+      if (status) {
         filter.status = status;
       }
       
-      if (search) {
+      if (search && this.searchFields.length > 0) {
         filter.$or = this.searchFields.map(field => ({
           [field]: { $regex: search, $options: 'i' }
         }));
@@ -226,12 +232,14 @@ class GenericEntityController {
         .skip(skip)
         .limit(Number(limit));
 
-      for (const field of this.populateFields) {
-        query = query.populate(field);
+     if (this.populateFields) {
+        this.populateFields.forEach(field => query.populate(field));
       }
 
-      const entities = await query.lean();
-      const total = await this.Model.countDocuments(filter);
+      const [entities, total] = await Promise.all([
+        query.lean().exec(),
+        this.Model.countDocuments(filter).exec()
+      ]);;
 
       return sendPaginated(
         res,
@@ -273,12 +281,16 @@ class GenericEntityController {
       const isOwner = req.user?.id?.toString() === id.toString();
       const isStaff = ['ADMIN', 'CAMPUS_MANAGER', 'TEACHER', 'DIRECTOR'].includes(req.user?.role);
       
+      if (!req.user) {
+        return sendError(res, 401, 'Authentication required');
+      }
+
       if (!isOwner && !isStaff) {
         return sendError(res, 403, 'Not authorized to view this profile');
       }
-
+      
       if (isStaff && !['ADMIN', 'DIRECTOR'].includes(req.user.role)) {
-        if (entity.schoolCampus._id.toString() !== req.user.campusId) {
+        if ( entity.schoolCampus._id.toString() !== req.user.campusId.toString() ) {
           return sendError(res, 403, `This ${this.entityNameLower} does not belong to your campus`);
         }
       }

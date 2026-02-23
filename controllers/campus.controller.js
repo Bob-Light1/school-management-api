@@ -74,12 +74,7 @@ const parseLocation = (fields) => {
   };
 };
 
-// ========================================
-// CAMPUS-SPECIFIC CONTROLLER EXTENSIONS
-// ========================================
-
 /**
- * Extended Campus Controller
  * Inherits generic CRUD + adds campus-specific methods
  */
 class CampusController extends GenericEntityController {
@@ -88,11 +83,14 @@ class CampusController extends GenericEntityController {
   }
 
   /**
-   * Override create to handle campus-specific logic
    * Campus creation is special because:
    * 1. Campus doesn't belong to another campus
    * 2. Campus has unique fields (manager_name, campus_name, location)
+   * 
+   * @route   POST /api/campus/create
+   * @access  Private
    */
+
   create = async (req, res) => {
     const session = await mongoose.startSession();
     session.startTransaction();
@@ -287,9 +285,12 @@ class CampusController extends GenericEntityController {
     }
   };
 
-  /**
-   * Override getAll to handle campus-specific filters
-   */
+/**
+ * Get existing campuses
+ * @route   GET /api/campus/all
+ * @access  Public
+ */
+
   getAll = async (req, res) => {
     try {
       const {
@@ -346,10 +347,45 @@ class CampusController extends GenericEntityController {
   };
 
   /**
+   * Get One single campus
+   * @route   GET /api/campus/:id
+   * @access  Private
+   */
+
+  getOne = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isValidObjectId(id)) {
+      return sendError(res, 400, 'Invalid campus ID format');
+    }
+
+    const campus = await Campus.findById(id).select('-password').lean();
+
+    if (!campus) {
+      return sendNotFound(res, 'Campus');
+    }
+
+    // Authorization : CAMPUS_MANAGER cqn only see is Owne campus! 
+    if (req.user.role === 'CAMPUS_MANAGER' && 
+        req.user.campusId.toString() !== id.toString()) {
+      return sendError(res, 403, 'You can only access your own campus');
+    }
+
+    return sendSuccess(res, 200, 'Campus retrieved successfully', campus);
+
+  } catch (error) {
+    console.error('❌ Error fetching campus:', error);
+    return sendError(res, 500, 'Failed to retrieve campus');
+  }
+};
+
+  /**
    * Update Campus Password
    * @route   PATCH /api/campus/:id/password
    * @access  Private
    */
+
   updatePassword = async (req, res) => {
     try {
       const { id } = req.params;
@@ -416,6 +452,7 @@ class CampusController extends GenericEntityController {
    * @route   GET /api/campus/:campusId/context
    * @access  Private
    */
+
   getContext = async (req, res) => {
     try {
       const { campusId } = req.params;
@@ -680,13 +717,13 @@ const campusController = new CampusController(campusConfig);
 // ========================================
 module.exports = {
   // Generic CRUD operations (inherited)
-  createCampus: campusController.create,
   getAllCampus: campusController.getAll,
-  getOneCampus: campusController.getOne,
   updateCampus: campusController.update,
   deleteCampus: campusController.archive,
 
   // Campus-specific operations
+  createCampus: campusController.create,
+  getOneCampus: campusController.getOne,
   loginCampus: campusController.login,
   updateCampusPassword: campusController.updatePassword,
   getCampusContext: campusController.getContext,

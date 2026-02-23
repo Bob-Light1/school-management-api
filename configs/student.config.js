@@ -24,6 +24,12 @@ const studentConfig = {
     { path: 'mentor', select: 'firstName lastName email' }
   ],
 
+  buildExtraFilters: (query) => {
+    const filters = {};
+    if (query.classId) filters.studentClass = query.classId;
+    return filters;
+  },
+
   /**
    * Custom validation before creation
    */

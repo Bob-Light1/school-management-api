@@ -19,7 +19,7 @@ const {
 const { authenticate, authorize } = require('../middleware/auth/auth');
 const { loginLimiter, strictLimiter, apiLimiter } = require('../middleware/rate-limiter/rate-limiter');
 
-// ✅ MULTER: Import upload middleware
+// MULTER: Import upload middleware
 const { 
   uploadCampusImage, 
   handleMulterError 
@@ -41,7 +41,7 @@ router.post("/login", loginLimiter, loginCampus);
 /**
  * @route   GET /api/campus/all
  * @desc    Get all campuses (with pagination)
- * @access  Public (or can be protected if needed)
+ * @access  Public
  * @note    Consider adding authentication if this contains sensitive data
  */
 router.get("/all", apiLimiter, getAllCampus);

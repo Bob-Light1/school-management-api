@@ -149,6 +149,7 @@ const subjectRouter = require('./routers/subject.router');
 const studentRouter = require('./routers/student.router');
 const teacherRouter = require('./routers/teacher.router');
 const adminRouter = require('./routers/admin.router');
+const departmentRouter = require('./routers/department.router');
 
 app.use('/api/campus', campusRouter);
 app.use('/api/class', classRouter);
@@ -157,6 +158,7 @@ app.use('/api/subject', subjectRouter);
 app.use('/api/students', studentRouter);
 app.use('/api/teachers', teacherRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/department', departmentRouter)
 
 // ========================================
 // 404 HANDLER

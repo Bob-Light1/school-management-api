@@ -173,7 +173,7 @@ router.delete(
 router.post(
   '/bulk/email',
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
-  studentController.bulkSendEmail
+  teacherController.bulkSendEmail
 );
 
 /**
@@ -201,7 +201,7 @@ router.post(
 router.get(
   '/export/csv',
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
-  studentController.exportToCSV
+  teacherController.exportToCSV
 );
 
 
@@ -213,7 +213,7 @@ router.get(
 router.get(
   '/export/excel',
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
-  studentController.exportToExcel
+  teacherController.exportToExcel
 );
 
 /**
@@ -224,7 +224,7 @@ router.get(
 router.get(
   '/export',
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
-  studentController.exportToCSV
+  teacherController.exportToCSV
 );
 
 /**
@@ -237,7 +237,7 @@ router.post(
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
   uploadDocument,        // Upload CSV/Excel file
   handleMulterError,
-  studentController.importFromFile
+  teacherController.importFromFile
 );
 
 /**
@@ -250,7 +250,7 @@ router.post(
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
   uploadDocument,        // Upload CSV file
   handleMulterError,
-  studentController.getImportTemplateCSV
+  teacherController.getImportTemplateCSV
 );
 
 /**
@@ -263,7 +263,7 @@ router.post(
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']),
   uploadDocument,        // Upload Excel file
   handleMulterError,
-  studentController.getImportTemplateExcel
+  teacherController.getImportTemplateExcel
 );
 
 module.exports = router;
