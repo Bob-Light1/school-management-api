@@ -23,7 +23,7 @@ const teacherConfig = {
   populateFields: [
     { path: 'department', select: 'name description' },
     { path: 'schoolCampus', select: 'campus_name location' },
-    { path: 'subjects', select: 'name code level' },
+    { path: 'subjects', select: 'subject_name subject_code' },
     { path: 'classes', select: 'className level' }
   ],
 
@@ -398,7 +398,6 @@ const teacherConfig = {
       withoutDepartment: result.withoutDepartment?.[0]?.count || 0,
 
       // Experience statistics
-
       experience: {
         average: Math.round(result.experienceStats?.[0]?.avgExp || 0),
         min: result.experienceStats?.[0]?.minExp || 0,

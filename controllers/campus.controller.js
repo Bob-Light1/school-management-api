@@ -9,6 +9,7 @@ const Campus = require('../models/campus.model');
 const Teacher = require('../models/teacher.model');
 const Student = require('../models/student.model');
 const Class = require('../models/class.model');
+const Subject = require('../models/subject.model');
 const Department = require('../models/department.model');
 
 const campusConfig = require('../configs/campus.config');
@@ -851,10 +852,10 @@ class CampusController extends GenericEntityController {
   };
 
   /**
-   * Get Campus Classes
-   * @route   GET /api/campus/:campusId/classes
-   * @access  Private
-   */
+ * Get Campus Classes
+ * @route  GET /api/campus/:campusId/classes
+ * @access Private
+ */
   getClasses = async (req, res) => {
     try {
       const { campusId } = req.params;
@@ -864,16 +865,19 @@ class CampusController extends GenericEntityController {
         return sendError(res, 400, 'Invalid campus ID format');
       }
 
-      // Authorization
-      if (req.user.role === 'CAMPUS_MANAGER' && req.user.campusId !== campusId) {
+      if (
+        req.user.role === 'CAMPUS_MANAGER' &&
+        req.user.campusId.toString() !== campusId.toString()
+      ) {
         return sendError(res, 403, 'You can only access classes from your own campus');
       }
 
-      const filter = { campus: campusId };
+      const filter = { schoolCampus: campusId };
       if (status) filter.status = status;
 
       const classes = await Class.find(filter)
-        .populate('teacher', 'firstName lastName')
+        .populate('level',        'name')
+        .populate('classManager', 'firstName lastName email profileImage')
         .sort({ className: 1 })
         .lean();
 
@@ -882,6 +886,44 @@ class CampusController extends GenericEntityController {
     } catch (error) {
       console.error('❌ getClasses error:', error);
       return sendError(res, 500, 'Failed to fetch classes');
+    }
+  };
+
+  /**
+   * Get Campus Subjects
+   * @route  GET /api/campus/:campusId/subjects
+   * @access Private
+   */
+  getSubjects = async (req, res) => {
+    try {
+      const { campusId } = req.params;
+      const { status } = req.query;
+
+      if (!isValidObjectId(campusId)) {
+        return sendError(res, 400, 'Invalid campus ID format');
+      }
+
+      if (
+        req.user.role === 'CAMPUS_MANAGER' &&
+        req.user.campusId.toString() !== campusId.toString()
+      ) {
+        return sendError(res, 403, 'You can only access subjects from your own campus');
+      }
+
+      const filter = { schoolCampus: campusId };
+      if (status) filter.status = status;
+
+      const subjects = await Subject.find(filter)
+        .populate('department', 'name') 
+        .populate('teachers',   'firstName lastName')
+        .sort({ name: 1 })
+        .lean();
+
+      return sendSuccess(res, 200, 'Subjects fetched successfully', subjects);
+
+    } catch (error) {
+      console.error('❌ getSubjects error:', error);
+      return sendError(res, 500, 'Failed to fetch subjects');
     }
   };
 
@@ -900,14 +942,13 @@ class CampusController extends GenericEntityController {
         return sendError(res, 400, 'Invalid campus ID format');
       }
 
+      // Authorization
       if (
         req.user.role === 'CAMPUS_MANAGER' &&
         req.user.campusId.toString() !== campusId.toString()
       ) {
         return sendError(res, 403, 'You can only access departments from your own campus');
       }
-
-      const Department = mongoose.model('Department');
 
       const filter = { schoolCampus: campusId };
       if (status) filter.status = status;
@@ -962,6 +1003,7 @@ module.exports = {
   getCampusMentors: campusController.getMentors,
   getCampusDepartments: campusController.getDepartments,
   getCampusClasses: campusController.getClasses,
+  getCampusSubjects: campusController.getSubjects,
 
   // Statistics (using student controller)
   getCampusStudentsStats: studentEntityController.getStats

@@ -15,6 +15,18 @@ const subjectSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Teachers teaching a subject
+    teachers: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Teacher",
+    }],
+
+    // Department to wich the subject belongs
+    department: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Department",
+    },
+
     // Subject name (e.g., "Mathematics", "Physics")
     subject_name: {
       type: String,

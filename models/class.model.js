@@ -47,6 +47,13 @@ const classSchema = new mongoose.Schema(
       }
     ],
 
+    // Teachers teaching in this class
+    teachers: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Teacher'
+      }
+    ],
+    
     // Class status
     status: {
       type: String,

@@ -17,7 +17,8 @@ const {
   getCampusDepartments,
   getCampusMentors,
   getCampusPartners,
-  getCampusParents
+  getCampusParents,
+  getCampusSubjects
 } = require('../controllers/campus.controller');
 
 const { authenticate, authorize } = require('../middleware/auth/auth');
@@ -214,6 +215,17 @@ router.get(
   "/:campusId/classes", 
   authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
   getCampusClasses
+);
+
+/**
+ * @route   GET /api/campus/:campusId/subjects
+ * @desc    Get all subjects in a campus
+ * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER
+ */
+router.get(
+  "/:campusId/subjects", 
+  authorize(['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER']), 
+  getCampusSubjects
 );
 
 /**

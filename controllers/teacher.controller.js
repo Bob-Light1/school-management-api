@@ -126,6 +126,7 @@ const loginTeacher = async (req, res) => {
     })
     .select('+password')
     .populate('department', 'name')
+    .populate('subjects', 'subject_name')
     .populate('schoolCampus', 'campus_name');
 
     // Generic error for security

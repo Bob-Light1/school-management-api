@@ -149,16 +149,26 @@ const subjectRouter = require('./routers/subject.router');
 const studentRouter = require('./routers/student.router');
 const teacherRouter = require('./routers/teacher.router');
 const adminRouter = require('./routers/admin.router');
+const resultRouter = require('./routers/result.router');
 const departmentRouter = require('./routers/department.router');
+const studentScheduleRouter = require('./routers/studentSchedule.router');
+const teacherScheduleRouter = require('./routers/teacherSchedule.router');
+const studentAttendanceRouter = require('./routers/studentAttendance.router');
+const teacherAttendanceRouter = require('./routers/teacherAttendance.router');
 
+app.use('/api/admin', adminRouter);
 app.use('/api/campus', campusRouter);
+app.use('/api/students', studentRouter);
+app.use('/api/teachers', teacherRouter);
 app.use('/api/class', classRouter);
 app.use('/api/level', levelRouter);
 app.use('/api/subject', subjectRouter);
-app.use('/api/students', studentRouter);
-app.use('/api/teachers', teacherRouter);
-app.use('/api/admin', adminRouter);
-app.use('/api/department', departmentRouter)
+app.use('/api/results', resultRouter);
+app.use('/api/department', departmentRouter);
+app.use('/api/schedules/student', studentScheduleRouter);
+app.use('/api/schedules/teacher', teacherScheduleRouter);
+app.use('/api/attendance/student', studentAttendanceRouter);
+app.use('/api/attendance/teacher', teacherAttendanceRouter);
 
 // ========================================
 // 404 HANDLER

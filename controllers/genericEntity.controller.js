@@ -1,9 +1,7 @@
-/** GENERIC ENTITY CONTROLLER **/
-
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { cleanupUploadedFile } = require('../middleware/upload/upload');
+const { deleteFile } = require('../utils/fileUpload');
 const {
   sendSuccess,
   sendError,
@@ -20,165 +18,198 @@ const {
   buildCampusFilter
 } = require('../utils/validationHelpers');
 
-const JWT_SECRET = process.env.JWT_SECRET;
 const SALT_ROUNDS = 10;
 
 class GenericEntityController {
   constructor(config) {
-    this.Model = config.Model;
-    this.entityName = config.entityName;
+    this.Model          = config.Model;
+    this.entityName     = config.entityName;
     this.entityNameLower = config.entityName.toLowerCase();
-    this.folderName = config.folderName;
-    this.searchFields = config.searchFields || ['firstName', 'lastName', 'email'];
+    this.folderName     = config.folderName;
+    this.searchFields   = config.searchFields   || ['firstName', 'lastName', 'email'];
     this.populateFields = config.populateFields || [];
     this.customValidation = config.customValidation || null;
-    this.beforeCreate = config.beforeCreate || null;
-    this.afterCreate = config.afterCreate || null;
-    this.beforeUpdate = config.beforeUpdate || null;
-    this.afterUpdate = config.afterUpdate || null;
-    this.statsFacets = config.statsFacets || null;
+    this.beforeCreate   = config.beforeCreate   || null;
+    this.afterCreate    = config.afterCreate    || null;
+    this.beforeUpdate   = config.beforeUpdate   || null;
+    this.afterUpdate    = config.afterUpdate    || null;
+    this.statsFacets    = config.statsFacets    || null;
     this.statsFormatter = config.statsFormatter || null;
     this.buildExtraFilters = config.buildExtraFilters || null;
   }
 
+  // ─────────────────────────────────────────────
+  // Internal helpers
+  // ─────────────────────────────────────────────
+
   /**
-   * CREATE ENTITY
+   * Applies the population to a Mongoose query (without lean)
+   * or populates an already loaded document.
    */
+  async _populate(target) {
+    for (const field of this.populateFields) {
+      target = await target.populate(field);
+    }
+    return target;
+  }
+
+  /**
+   * Resolves the campusId based on the user's role.
+   * Returns { campusId } or { error } to handle failure.
+   */
+  _resolveCampusId(user, fields) {
+    if (user.role === 'CAMPUS_MANAGER') {
+      return { campusId: user.campusId };
+    }
+    if (user.role === 'ADMIN' || user.role === 'DIRECTOR') {
+      if (!fields.schoolCampus) {
+        return { error: 'Campus ID is required' };
+      }
+      return { campusId: fields.schoolCampus };
+    }
+    return { forbidden: true };
+  }
+
+  // ─────────────────────────────────────────────
+  // CREATE
+  // ─────────────────────────────────────────────
   create = async (req, res) => {
     const session = await mongoose.startSession();
     session.startTransaction();
 
+    // Flag to know if the transaction is still active
+    let transactionActive = true;
+
+    const safeAbort = async () => {
+      if (transactionActive) {
+        transactionActive = false;
+        await session.abortTransaction();
+      }
+    };
+
     try {
-      const fields = req.body;
-      
+      const fields      = { ...req.body };
       const uploadedFile = req.file;
-      
+
+      // ── 1. Resolve the campus ──────────────────
+      const campusResolution = this._resolveCampusId(req.user, fields);
+      if (campusResolution.forbidden) {
+        await safeAbort();
+        return sendError(res, 403, 'Not authorized to create entities');
+      }
+      if (campusResolution.error) {
+        await safeAbort();
+        return sendError(res, 400, campusResolution.error);
+      }
+      const campusId = campusResolution.campusId;
+
+      // ── 2. Extract authentication fields ───────
       const { email, username, password, ...rest } = fields;
 
-      // Validate required fields
+      // ── 3. Validate required fields ─────────────
       if (!email || !username || !password) {
-        await session.abortTransaction();
+        await safeAbort();
         return sendError(res, 400, 'Email, username, and password are required');
       }
 
-      // Validate email
       if (!isValidEmail(email)) {
-        await session.abortTransaction();
+        await safeAbort();
         return sendError(res, 400, 'Invalid email format');
       }
 
-      // Validate password
       const passwordValidation = validatePasswordStrength(password);
       if (!passwordValidation.valid) {
-        await session.abortTransaction();
+        await safeAbort();
         return sendError(res, 400, 'Password does not meet requirements', {
           errors: passwordValidation.errors
         });
       }
 
-      // Check email uniqueness
-      const existingEmail = await this.Model.findOne({ 
-        email: email.toLowerCase() 
-      }).session(session);
-
-      if (existingEmail) {
-        await session.abortTransaction();
-        return sendConflict(res, 'This email is already registered');
+      // ── 4. Hook beforeCreate ─────────────────────────
+      if (this.beforeCreate) {
+        const hookResult = await this.beforeCreate(fields, campusId, session);
+        if (!hookResult.success) {
+          await safeAbort();
+          return sendError(res, 400, hookResult.error);
+        }
+        // Merge enriched data (employee number, etc.) into rest
+        if (hookResult.data) {
+          Object.assign(rest, hookResult.data);
+        }
       }
 
-      // Check username uniqueness
-      const existingUser = await this.Model.findOne({ 
-        username: username.toLowerCase() 
-      }).session(session);
+      // ── 5. Uniqueness of email / username ─────────────
+      const [existingEmail, existingUser] = await Promise.all([
+        this.Model.findOne({ email: email.toLowerCase() }).session(session),
+        this.Model.findOne({ username: username.toLowerCase() }).session(session),
+      ]);
 
+      if (existingEmail) {
+        await safeAbort();
+        return sendConflict(res, 'This email is already registered');
+      }
       if (existingUser) {
-        await session.abortTransaction();
+        await safeAbort();
         return sendConflict(res, 'This username is already taken');
       }
 
-      // Determine campus
-      let campusId;
-      if (req.user.role === 'CAMPUS_MANAGER') {
-        campusId = req.user.campusId;
-      } else if (req.user.role === 'ADMIN' || req.user.role === 'DIRECTOR') {
-        if (!fields.schoolCampus) {
-          await session.abortTransaction();
-          return sendError(res, 400, 'Campus ID is required');
-        }
-        campusId = fields.schoolCampus;
-      } else {
-        await session.abortTransaction();
-        return sendError(res, 403, 'Not authorized to create entities');
-      }
-
-      // Custom validation
+      // ── 6. Custom validation ─────────────────
       if (this.customValidation) {
         const customValidationResult = await this.customValidation(fields, campusId, session);
         if (!customValidationResult.valid) {
-          await session.abortTransaction();
+          await safeAbort();
           return sendError(res, 400, customValidationResult.error);
         }
       }
 
-      // Before create hook
-      if (this.beforeCreate) {
-        const hookResult = await this.beforeCreate(fields, campusId, session);
-        if (!hookResult.success) {
-          await session.abortTransaction();
-          return sendError(res, 400, hookResult.error);
-        }
-      }
+      // ── 7. Hash the password ──────────────────────
+      const salt           = await bcrypt.genSalt(SALT_ROUNDS);
+      const hashedPassword = await bcrypt.hash(password, salt);
 
       const profileImage = uploadedFile ? uploadedFile.path : null;
 
-      // Hash password
-      const salt = await bcrypt.genSalt(SALT_ROUNDS);
-      const hashedPassword = await bcrypt.hash(password, salt);
-
-      // Create entity
-      const entityData = { 
-        ...rest, 
-        email: email.toLowerCase(), 
-        username: username.toLowerCase(), 
-        password: hashedPassword,
+      // ── 8. Create the document ──────────────────────
+      const entityData = {
+        ...rest,
+        email:        email.toLowerCase(),
+        username:     username.toLowerCase(),
+        password:     hashedPassword,
         schoolCampus: campusId,
-        profileImage
+        profileImage,
       };
 
-      const entity = new this.Model(entityData);
+      const entity      = new this.Model(entityData);
       const savedEntity = await entity.save({ session });
 
+      // ── 9. Commit the transaction ──────────────────
+      transactionActive = false;
       await session.commitTransaction();
 
-      // After create hook
+      // ── 10. Hook afterCreate (outside the transaction, non-blocking) ──
       if (this.afterCreate) {
-        await this.afterCreate(savedEntity);
+        this.afterCreate(savedEntity).catch(err =>
+          console.error('Non-critical error in afterCreate:', err)
+        );
       }
 
-      // Populate and return
-      let populatedEntity = await this.Model.findById(savedEntity._id)
-        .select('-password');
+      // ── 11. Populate & response ───────────────────────
+      let populatedEntity = await this.Model.findById(savedEntity._id).select('-password');
+      populatedEntity     = await this._populate(populatedEntity);
 
-      for (const field of this.populateFields) {
-        populatedEntity = await populatedEntity.populate(field);
-      }
-
-      populatedEntity = populatedEntity.toObject();
-
-      return sendCreated(res, `${this.entityName} created successfully`, populatedEntity);
+      // FIX typo: populatedEntity.toObject() (the dot was missing)
+      return sendCreated(res, `${this.entityName} created successfully`, populatedEntity.toObject());
 
     } catch (error) {
-      await session.abortTransaction();
-      await cleanupUploadedFile(req.file);
-      
+      await safeAbort();
+
+      if (req.file) await cleanupUploadedFile(req.file).catch(console.error);
+
       console.error(`❌ Error creating ${this.entityNameLower}:`, error);
 
-      if (error.code === 11000) {
-        return handleDuplicateKeyError(res, error);
-      }
+      if (error.code === 11000) return handleDuplicateKeyError(res, error);
 
       if (error.name === 'ValidationError') {
-        const messages = Object.values(error.errors).map(err => err.message);
+        const messages = Object.values(error.errors).map(e => e.message);
         return sendError(res, 400, 'Validation failed', { errors: messages });
       }
 
@@ -188,65 +219,68 @@ class GenericEntityController {
     }
   };
 
-  /**
-   * GET ALL ENTITIES WITH FILTERS
-   */
+  // ─────────────────────────────────────────────
+  // GET ALL
+  // ─────────────────────────────────────────────
   getAll = async (req, res) => {
     try {
-      const { 
-        campusId, 
-        classId, 
-        status, 
+      const {
+        campusId,
+        status,
         search,
-        limit = 50, 
-        page = 1,
-        includeArchived, 
+        includeArchived,
+        page  = 1,
+        limit = 50,
       } = req.query;
-      
+
+      // Max limit to avoid full-collection scans
+      const safeLimit = Math.min(Number(limit), 200);
+      const skip      = (Number(page) - 1) * safeLimit;
+
       const filter = buildCampusFilter(req.user, campusId);
-  
-     if (this.buildExtraFilters) {
-        const extraFilters = this.buildExtraFilters(req.query);
-        Object.assign(filter, extraFilters);
+
+      if (this.buildExtraFilters) {
+        Object.assign(filter, this.buildExtraFilters(req.query));
       }
-      
-     if (includeArchived !== 'true') {
+
+      // Conflict between includeArchived / status resolved
+      if (status) {
+        filter.status = status;
+      } else if (includeArchived !== 'true') {
         filter.status = { $ne: 'archived' };
       }
 
-      if (status) {
-        filter.status = status;
-      }
-      
       if (search && this.searchFields.length > 0) {
         filter.$or = this.searchFields.map(field => ({
-          [field]: { $regex: search, $options: 'i' }
+          [field]: { $regex: search, $options: 'i' },
         }));
       }
 
-      const skip = (Number(page) - 1) * Number(limit);
-
+      // The documents are populated and then converted with toObject()
       let query = this.Model.find(filter)
         .select('-password')
         .sort({ createdAt: -1 })
         .skip(skip)
-        .limit(Number(limit));
+        .limit(safeLimit);
 
-     if (this.populateFields) {
+      if (this.populateFields.length > 0) {
         this.populateFields.forEach(field => query.populate(field));
       }
 
       const [entities, total] = await Promise.all([
-        query.lean().exec(),
-        this.Model.countDocuments(filter).exec()
-      ]);;
+        query.exec(),
+        this.Model.countDocuments(filter).exec(),
+      ]);
+
+      // Conversion to POJO after population
+      const plainEntities = entities.map(e => e.toObject());
 
       return sendPaginated(
         res,
         200,
         `${this.entityName}s retrieved successfully`,
-        entities,
-        { total, page, limit }
+        plainEntities,
+        { total, page: Number(page), limit: safeLimit }
       );
 
     } catch (error) {
@@ -255,9 +289,9 @@ class GenericEntityController {
     }
   };
 
-  /**
-   * GET ONE ENTITY BY ID
-   */
+  // ─────────────────────────────────────────────
+  // GET ONE
+  // ─────────────────────────────────────────────
   getOne = async (req, res) => {
     try {
       const { id } = req.params;
@@ -266,31 +300,31 @@ class GenericEntityController {
         return sendError(res, 400, `Invalid ${this.entityNameLower} ID format`);
       }
 
+      // Check req.user FIRST
+      if (!req.user) {
+        return sendError(res, 401, 'Authentication required');
+      }
+
       let entity = await this.Model.findById(id).select('-password');
 
       if (!entity) {
         return sendNotFound(res, this.entityName);
       }
 
-      for (const field of this.populateFields) {
-        entity = await entity.populate(field);
-      }
-
+      entity = await this._populate(entity);
       entity = entity.toObject();
 
-      const isOwner = req.user?.id?.toString() === id.toString();
-      const isStaff = ['ADMIN', 'CAMPUS_MANAGER', 'TEACHER', 'DIRECTOR'].includes(req.user?.role);
-      
-      if (!req.user) {
-        return sendError(res, 401, 'Authentication required');
-      }
+      const isOwner = req.user.id?.toString() === id.toString();
+      const isStaff = ['ADMIN', 'CAMPUS_MANAGER', 'TEACHER', 'DIRECTOR'].includes(req.user.role);
 
       if (!isOwner && !isStaff) {
         return sendError(res, 403, 'Not authorized to view this profile');
       }
-      
+
+      // Campus check for non-admins
       if (isStaff && !['ADMIN', 'DIRECTOR'].includes(req.user.role)) {
-        if ( entity.schoolCampus._id.toString() !== req.user.campusId.toString() ) {
+        const entityCampusId = entity.schoolCampus?._id?.toString() || entity.schoolCampus?.toString();
+        if (entityCampusId !== req.user.campusId?.toString()) {
           return sendError(res, 403, `This ${this.entityNameLower} does not belong to your campus`);
         }
       }
@@ -303,22 +337,22 @@ class GenericEntityController {
     }
   };
 
-  /**
-   * UPDATE ENTITY
-   * Migrated to Multer
-   */
+  // ─────────────────────────────────────────────
+  // UPDATE
+  // ─────────────────────────────────────────────
   update = async (req, res) => {
     try {
       const { id } = req.params;
-      
+
       if (!isValidObjectId(id)) {
         return sendError(res, 400, `Invalid ${this.entityNameLower} ID format`);
       }
 
-      const fields = req.body;
+      const fields       = req.body;
       const uploadedFile = req.file;
-      const updates = { ...fields };
+      const updates      = { ...fields };
 
+      // These fields should never be updated via this route
       delete updates.password;
       delete updates.schoolCampus;
 
@@ -336,23 +370,21 @@ class GenericEntityController {
         return sendError(res, 403, `Not authorized to update ${this.entityNameLower}s`);
       }
 
-      // Check email uniqueness
+      // Email uniqueness
       if (updates.email && updates.email.toLowerCase() !== entity.email) {
         if (!isValidEmail(updates.email)) {
           return sendError(res, 400, 'Invalid email format');
         }
-
-        const emailExists = await this.Model.findOne({ 
+        const emailExists = await this.Model.findOne({
           email: updates.email.toLowerCase(),
-          _id: { $ne: id }
+          _id:   { $ne: id },
         });
-
         if (emailExists) {
           return sendConflict(res, 'This email is already in use');
         }
       }
 
-      // Before update hook
+      // Hook beforeUpdate
       if (this.beforeUpdate) {
         const hookResult = await this.beforeUpdate(entity, updates);
         if (!hookResult.success) {
@@ -360,56 +392,51 @@ class GenericEntityController {
         }
       }
 
-      
+      // Profile image management
       if (uploadedFile) {
-        // Delete old image if exists
         if (entity.profileImage) {
-          const { deleteFile } = require('../utils/fileUpload');
+          // static import
           await deleteFile(this.folderName, entity.profileImage).catch(console.error);
         }
-        
         updates.profileImage = uploadedFile.path;
       }
 
-      // Normalize
-      if (updates.email) updates.email = updates.email.toLowerCase();
+      // Normalization
+      if (updates.email)    updates.email    = updates.email.toLowerCase();
       if (updates.username) updates.username = updates.username.toLowerCase();
 
-      // Update
       let updatedEntity = await this.Model.findByIdAndUpdate(
-        id, 
-        updates, 
+        id,
+        updates,
         { new: true, runValidators: true }
       ).select('-password');
 
-      for (const field of this.populateFields) {
-        updatedEntity = await updatedEntity.populate(field);
-      }
-
+      updatedEntity = await this._populate(updatedEntity);
       updatedEntity = updatedEntity.toObject();
 
-      // After update hook
       if (this.afterUpdate) {
-        await this.afterUpdate(updatedEntity);
+        await this.afterUpdate(updatedEntity).catch(err =>
+          console.error('Non-critical error in afterUpdate:', err)
+        );
       }
 
       return sendSuccess(res, 200, `${this.entityName} updated successfully`, updatedEntity);
 
     } catch (error) {
-      await cleanupUploadedFile(req.file);
+      // guard on req.file before cleanup
+      if (req.file) await cleanupUploadedFile(req.file).catch(console.error);
+
       console.error(`❌ Error updating ${this.entityNameLower}:`, error);
-      
-      if (error.code === 11000) {
-        return handleDuplicateKeyError(res, error);
-      }
+
+      if (error.code === 11000) return handleDuplicateKeyError(res, error);
 
       return sendError(res, 500, `Failed to update ${this.entityNameLower}`);
     }
   };
 
-  /**
-   * ARCHIVE ENTITY (Soft Delete)
-   */
+  // ─────────────────────────────────────────────
+  // ARCHIVE (Soft Delete)
+  // ─────────────────────────────────────────────
   archive = async (req, res) => {
     try {
       const { id } = req.params;
@@ -440,9 +467,9 @@ class GenericEntityController {
     }
   };
 
-  /**
-   * GET STATISTICS
-   */
+  // ─────────────────────────────────────────────
+  // GET STATS
+  // ─────────────────────────────────────────────
   getStats = async (req, res) => {
     try {
       const { campusId } = req.params;
@@ -456,44 +483,35 @@ class GenericEntityController {
       startOfMonth.setDate(1);
 
       const baseFacets = {
-        total: [{ $count: "count" }],
+        total: [{ $count: 'count' }],
         newThisMonth: [
           { $match: { createdAt: { $gte: startOfMonth } } },
-          { $count: "count" }
-        ]
+          { $count: 'count' },
+        ],
       };
 
-      const customFacets = this.statsFacets
-        ? this.statsFacets(startOfMonth)
-        : {};
-
-      const facets = { ...baseFacets, ...customFacets };
+      const customFacets = this.statsFacets ? this.statsFacets(startOfMonth) : {};
+      const facets        = { ...baseFacets, ...customFacets };
 
       const statsArray = await this.Model.aggregate([
         {
           $match: {
             schoolCampus: new mongoose.Types.ObjectId(campusId),
-            status: 'active'
-          }
+            status:       'active',
+          },
         },
-        { $facet: facets }
+        { $facet: facets },
       ]);
 
-      const result = statsArray[0];
-
+      const result    = statsArray[0];
       const baseStats = {
-        totalEntities: result.total?.[0]?.count || 0,
-        newEntitiesThisMonth: result.newThisMonth?.[0]?.count || 0
+        totalEntities:         result.total?.[0]?.count        || 0,
+        newEntitiesThisMonth:  result.newThisMonth?.[0]?.count || 0,
       };
 
-      const customStats = this.statsFormatter
-        ? this.statsFormatter(result)
-        : {};
+      const customStats = this.statsFormatter ? this.statsFormatter(result) : {};
 
-      return sendSuccess(res, 200, 'Statistics retrieved', {
-        ...baseStats,
-        ...customStats
-      });
+      return sendSuccess(res, 200, 'Statistics retrieved', { ...baseStats, ...customStats });
 
     } catch (error) {
       console.error('Stats Error:', error);

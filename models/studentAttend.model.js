@@ -1,313 +1,205 @@
-const mongoose = require('mongoose');
+'use strict';
 
 /**
- * Student Attendance Schema
- * Tracks student presence for each scheduled session
- * Multi-tenant isolated by campus
+ * @file studentAttend.model.js
+ * @description Mongoose model for student attendance records.
+ *
+ *  Alignements avec le backend foruni :
+ *  ──────────────────────────────────────
+ *  • Campus isolation : schoolCampus (ObjectId → 'Campus')
+ *  • student  → ref 'Student' (student_model.js)
+ *  • schedule → ref 'StudentSchedule' (studentSchedule.model.js)
+ *  • class    → ref 'Class' (class_model.js)
+ *  • subject  → ref 'Subject' (subject_model.js)
+ *  • recordedBy / justifiedBy → ref 'Teacher' (teacher_model.js)
+ *  • lockedBy  → refPath 'lockedByModel' : 'Teacher' | 'Campus' | 'System'
+ *  • semester  → 'S1' | 'S2' | 'Annual' (String)
+ *  • mongoose.Types.ObjectId() (syntaxe v6+, pas mongoose.Types.ObjectId())
+ *  • Date.prototype.getWeekNumber → méthode locale sans pollution du prototype
  */
+
+const mongoose = require('mongoose');
+
+// ─────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────
+
+/** Calcule le numéro de semaine ISO d'une date. */
+const getWeekNumber = (date) => {
+  const d      = new Date(date);
+  const oneJan = new Date(d.getFullYear(), 0, 1);
+  const days   = Math.floor((d - oneJan) / (24 * 60 * 60 * 1000));
+  return Math.ceil((days + oneJan.getDay() + 1) / 7);
+};
+
+// ─────────────────────────────────────────────
+// SCHEMA
+// ─────────────────────────────────────────────
+
 const studentAttendanceSchema = new mongoose.Schema(
   {
-    // ========================================
-    // CORE REFERENCES
-    // ========================================
-
-    // Student reference
+    // ── REFERENCES ──────────────────────────
     student: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Student',
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      'Student',
       required: [true, 'Student is required'],
-      index: true,
+      index:    true,
     },
 
-    // Schedule session reference (the class session)
+    /** Séance planifiée (StudentSchedule) */
     schedule: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Schedule',
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      'StudentSchedule',
       required: [true, 'Schedule is required'],
-      index: true,
+      index:    true,
     },
 
-    // Class reference (denormalized for faster queries)
+    /** Dénormalisé pour les requêtes rapides */
     class: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Class',
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      'Class',
       required: [true, 'Class is required'],
-      index: true,
+      index:    true,
     },
 
-    // Campus reference (denormalized for campus isolation)
+    /** Isolation campus */
     schoolCampus: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Campus',
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      'Campus',
       required: [true, 'Campus is required'],
-      index: true,
+      index:    true,
     },
 
-    // Subject reference (denormalized)
+    /** Matière (dénormalisé) */
     subject: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Subject',
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      'Subject',
       required: [true, 'Subject is required'],
     },
 
-    // Teacher who recorded attendance
+    /** Enseignant qui a enregistré la présence */
     recordedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Teacher',
+      type:     mongoose.Schema.Types.ObjectId,
+      ref:      'Teacher',
       required: [true, 'Recorder is required'],
     },
 
-    // ========================================
-    // ATTENDANCE STATUS
-    // ========================================
-
-    // Attendance status: false = absent (default), true = present
+    // ── STATUT DE PRÉSENCE ───────────────────
+    /** false = absent (défaut), true = présent */
     status: {
-      type: Boolean,
-      default: false, // Default is ABSENT (unchecked)
-      index: true,
+      type:    Boolean,
+      default: false,
+      index:   true,
     },
 
-    // ========================================
-    // DATE & TIME TRACKING
-    // ========================================
-
-    // Date of the session (YYYY-MM-DD format for easy queries)
+    // ── DATE & HEURE ────────────────────────
     attendanceDate: {
-      type: Date,
+      type:     Date,
       required: [true, 'Attendance date is required'],
-      index: true,
+      index:    true,
     },
 
-    // Session time (for reference)
-    sessionStartTime: {
-      type: String, // HH:mm
-    },
+    /** Format HH:mm */
+    sessionStartTime: { type: String },
+    sessionEndTime:   { type: String },
 
-    sessionEndTime: {
-      type: String, // HH:mm
-    },
-
-    // Academic period
+    // ── PÉRIODE ACADÉMIQUE ───────────────────
     academicYear: {
-      type: String,
+      type:     String,
       required: [true, 'Academic year is required'],
-      index: true,
+      index:    true,
       validate: {
-        validator: function(v) {
-          return /^\d{4}-\d{4}$/.test(v);
-        },
-        message: 'Academic year must be in format YYYY-YYYY',
+        validator: (v) => /^\d{4}-\d{4}$/.test(v),
+        message:   'Academic year must be in format YYYY-YYYY',
       },
     },
 
+    /** Cohérent avec studentAttendance existant et schedule.base.js */
     semester: {
-      type: String,
+      type:     String,
       required: [true, 'Semester is required'],
-      enum: ['S1', 'S2', 'Annual'],
-      index: true,
+      enum:     ['S1', 'S2', 'Annual'],
+      index:    true,
     },
 
-    // Week and month for statistical queries
-    weekNumber: {
-      type: Number,
-      min: 1,
-      max: 52,
-      index: true,
-    },
+    weekNumber: { type: Number, min: 1, max: 52, index: true },
+    month:      { type: Number, min: 1, max: 12, index: true },
+    year:       { type: Number, index: true },
 
-    month: {
-      type: Number,
-      min: 1,
-      max: 12,
-      index: true,
-    },
-
-    year: {
-      type: Number,
-      index: true,
-    },
-
-    // ========================================
-    // LOCKING MECHANISM (After end of day)
-    // ========================================
-
-    // Is this attendance record locked? (cannot modify status after day ends)
-    isLocked: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-
-    // When was it locked
-    lockedAt: {
-      type: Date,
-    },
-
-    // Who locked it (system or admin)
+    // ── VERROUILLAGE ────────────────────────
+    isLocked: { type: Boolean, default: false, index: true },
+    lockedAt: { type: Date },
     lockedBy: {
-      type: mongoose.Schema.Types.ObjectId,
+      type:    mongoose.Schema.Types.ObjectId,
       refPath: 'lockedByModel',
     },
-
     lockedByModel: {
       type: String,
       enum: ['Teacher', 'Campus', 'System'],
     },
 
-    // ========================================
-    // JUSTIFICATION (For absences)
-    // ========================================
-
-    // Justified absence reason
+    // ── JUSTIFICATION ───────────────────────
     justification: {
-      type: String,
+      type:      String,
       maxlength: [500, 'Justification must not exceed 500 characters'],
-      trim: true,
+      trim:      true,
     },
+    justificationDocument: { type: String },
+    isJustified: { type: Boolean, default: false },
+    justifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Teacher' },
+    justifiedAt: { type: Date },
 
-    // Supporting document (medical certificate, etc.)
-    justificationDocument: {
-      type: String, // File path or URL
-    },
-
-    // Is the absence justified/excused
-    isJustified: {
-      type: Boolean,
-      default: false,
-    },
-
-    // Who added justification
-    justifiedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Teacher',
-    },
-
-    // When was justification added
-    justifiedAt: {
-      type: Date,
-    },
-
-    // ========================================
-    // METADATA
-    // ========================================
-
-    // Remarks by teacher
+    // ── MÉTADONNÉES ─────────────────────────
     remarks: {
-      type: String,
+      type:      String,
       maxlength: [500, 'Remarks must not exceed 500 characters'],
-      trim: true,
+      trim:      true,
     },
-
-    // Was attendance taken late?
-    isLate: {
-      type: Boolean,
-      default: false,
-    },
-
-    // Recording timestamp
-    recordedAt: {
-      type: Date,
-      default: Date.now,
-    },
-
-    // Last modification (before locking)
-    lastModifiedAt: {
-      type: Date,
-    },
-
-    lastModifiedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Teacher',
-    },
+    isLate:         { type: Boolean, default: false },
+    recordedAt:     { type: Date, default: Date.now },
+    lastModifiedAt: { type: Date },
+    lastModifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Teacher' },
   },
   {
-    timestamps: true, // createdAt & updatedAt
-    toJSON: { virtuals: true },
-    toObject: { virtuals: true },
+    timestamps: true,
+    toJSON:     { virtuals: true },
+    toObject:   { virtuals: true },
   }
 );
 
-// ========================================
-// INDEXES FOR PERFORMANCE
-// ========================================
+// ─────────────────────────────────────────────
+// INDEXES
+// ─────────────────────────────────────────────
 
-/**
- * Compound index: Prevent duplicate attendance records
- * One record per student per schedule session
- */
+/** Un seul enregistrement par étudiant, par séance, par date */
 studentAttendanceSchema.index(
   { student: 1, schedule: 1, attendanceDate: 1 },
   { unique: true }
 );
 
-/**
- * Queries for campus statistics
- */
-studentAttendanceSchema.index({
-  schoolCampus: 1,
-  attendanceDate: 1,
-  status: 1,
-});
+studentAttendanceSchema.index({ schoolCampus: 1, attendanceDate: 1, status: 1 });
+studentAttendanceSchema.index({ class: 1, attendanceDate: 1, academicYear: 1, semester: 1 });
+studentAttendanceSchema.index({ student: 1, academicYear: 1, semester: 1, status: 1 });
+studentAttendanceSchema.index({ schoolCampus: 1, year: 1, month: 1, weekNumber: 1 });
 
-/**
- * Queries for class attendance
- */
-studentAttendanceSchema.index({
-  class: 1,
-  attendanceDate: 1,
-  academicYear: 1,
-  semester: 1,
-});
-
-/**
- * Queries for student attendance history
- */
-studentAttendanceSchema.index({
-  student: 1,
-  academicYear: 1,
-  semester: 1,
-  status: 1,
-});
-
-/**
- * Queries for weekly/monthly reports
- */
-studentAttendanceSchema.index({
-  schoolCampus: 1,
-  year: 1,
-  month: 1,
-  weekNumber: 1,
-});
-
-// ========================================
+// ─────────────────────────────────────────────
 // PRE-SAVE MIDDLEWARE
-// ========================================
+// ─────────────────────────────────────────────
 
-/**
- * Auto-calculate week, month, year from attendanceDate
- * Prevent modification of locked records
- */
-studentAttendanceSchema.pre('save', function(next) {
+studentAttendanceSchema.pre('save', function (next) {
   try {
-    // Extract week, month, year from attendanceDate
     if (this.attendanceDate) {
-      const date = new Date(this.attendanceDate);
-      this.month = date.getMonth() + 1; // 1-12
-      this.year = date.getFullYear();
-      
-      // Calculate week number
-      const oneJan = new Date(date.getFullYear(), 0, 1);
-      const numberOfDays = Math.floor((date - oneJan) / (24 * 60 * 60 * 1000));
-      this.weekNumber = Math.ceil((numberOfDays + oneJan.getDay() + 1) / 7);
+      const d      = new Date(this.attendanceDate);
+      this.month   = d.getMonth() + 1;
+      this.year    = d.getFullYear();
+      this.weekNumber = getWeekNumber(d);
     }
 
-    // Prevent modification of locked records (except justification)
+    // Empêcher la modification d'un enregistrement verrouillé
     if (!this.isNew && this.isLocked && this.isModified('status')) {
       return next(new Error('Cannot modify locked attendance record. Add justification instead.'));
     }
 
-    // Track last modification
     if (this.isModified('status') || this.isModified('justification')) {
       this.lastModifiedAt = new Date();
     }
@@ -318,171 +210,159 @@ studentAttendanceSchema.pre('save', function(next) {
   }
 });
 
-// ========================================
+// ─────────────────────────────────────────────
 // INSTANCE METHODS
-// ========================================
+// ─────────────────────────────────────────────
 
 /**
- * Lock attendance record (cannot modify status after this)
+ * Verrouille l'enregistrement (impossible de modifier le statut ensuite).
+ * @param {ObjectId} lockedBy
+ * @param {string}   lockedByModel  – 'Teacher' | 'Campus' | 'System'
  */
-studentAttendanceSchema.methods.lock = async function(lockedBy, lockedByModel = 'System') {
-  if (this.isLocked) {
-    throw new Error('Attendance record is already locked');
-  }
-
-  this.isLocked = true;
-  this.lockedAt = new Date();
-  this.lockedBy = lockedBy;
+studentAttendanceSchema.methods.lock = async function (
+  lockedBy,
+  lockedByModel = 'System'
+) {
+  if (this.isLocked) throw new Error('Attendance record is already locked');
+  this.isLocked      = true;
+  this.lockedAt      = new Date();
+  this.lockedBy      = lockedBy;
   this.lockedByModel = lockedByModel;
-  
   await this.save();
   return this;
 };
 
 /**
- * Add justification for absence
+ * Ajoute une justification d'absence.
+ * @param {string}   justification
+ * @param {ObjectId} justifiedBy  – ref Teacher
+ * @param {string}   [doc]        – URL du document justificatif
  */
-studentAttendanceSchema.methods.addJustification = async function(
+studentAttendanceSchema.methods.addJustification = async function (
   justification,
   justifiedBy,
-  document = null
+  doc = null
 ) {
   if (this.status === true) {
     throw new Error('Cannot justify absence for present student');
   }
-
   this.justification = justification;
-  this.justifiedBy = justifiedBy;
-  this.justifiedAt = new Date();
-  this.isJustified = true;
-  
-  if (document) {
-    this.justificationDocument = document;
-  }
-
+  this.justifiedBy   = justifiedBy;
+  this.justifiedAt   = new Date();
+  this.isJustified   = true;
+  if (doc) this.justificationDocument = doc;
   await this.save();
   return this;
 };
 
 /**
- * Toggle attendance status (with confirmation for unchecking)
+ * Bascule le statut de présence.
+ * @param {boolean}  newStatus
+ * @param {ObjectId} userId – ref Teacher
  */
-studentAttendanceSchema.methods.toggleStatus = async function(newStatus, userId) {
+studentAttendanceSchema.methods.toggleStatus = async function (newStatus, userId) {
   if (this.isLocked) {
     throw new Error('Cannot modify locked attendance. Add justification instead.');
   }
-
-  this.status = newStatus;
+  this.status         = newStatus;
   this.lastModifiedBy = userId;
   this.lastModifiedAt = new Date();
 
-  // If marking as absent, clear justification
   if (newStatus === false) {
-    this.isJustified = false;
-    this.justification = null;
-    this.justificationDocument = null;
+    this.isJustified            = false;
+    this.justification          = null;
+    this.justificationDocument  = null;
   }
 
   await this.save();
   return this;
 };
 
-// ========================================
+// ─────────────────────────────────────────────
 // STATIC METHODS
-// ========================================
+// ─────────────────────────────────────────────
 
 /**
- * Lock all attendance records for a specific date
- * Called automatically at end of day
+ * Verrouille tous les enregistrements d'une date donnée sur un campus.
+ * @param {Date}     date
+ * @param {ObjectId} [campusId]
  */
-studentAttendanceSchema.statics.lockDailyAttendance = async function(date, campusId = null) {
-  const startOfDay = new Date(date);
-  startOfDay.setHours(0, 0, 0, 0);
-  
-  const endOfDay = new Date(date);
-  endOfDay.setHours(23, 59, 59, 999);
+studentAttendanceSchema.statics.lockDailyAttendance = async function (
+  date,
+  campusId = null
+) {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(date);
+  end.setHours(23, 59, 59, 999);
 
   const filter = {
-    attendanceDate: { $gte: startOfDay, $lte: endOfDay },
+    attendanceDate: { $gte: start, $lte: end },
     isLocked: false,
   };
+  if (campusId) filter.schoolCampus = campusId;
 
-  if (campusId) {
-    filter.schoolCampus = campusId;
-  }
-
-  const result = await this.updateMany(filter, {
+  return this.updateMany(filter, {
     $set: {
-      isLocked: true,
-      lockedAt: new Date(),
+      isLocked:      true,
+      lockedAt:      new Date(),
       lockedByModel: 'System',
     },
   });
-
-  return result;
 };
 
 /**
- * Calculate attendance statistics for a student
+ * Statistiques de présence pour un étudiant.
+ * @param {ObjectId} studentId
+ * @param {string}   academicYear
+ * @param {string}   semester  – 'S1' | 'S2' | 'Annual'
+ * @param {string}   period    – 'all' | 'month' | 'week'
  */
-studentAttendanceSchema.statics.getStudentStats = async function(
+studentAttendanceSchema.statics.getStudentStats = async function (
   studentId,
   academicYear,
   semester,
-  period = 'all' // 'all', 'month', 'week'
+  period = 'all'
 ) {
   const matchStage = {
-    student: mongoose.Types.ObjectId(studentId),
+    student: new mongoose.Types.ObjectId(studentId),
     academicYear,
     semester,
   };
 
-  // Add period filter
+  const now = new Date();
   if (period === 'month') {
-    const now = new Date();
     matchStage.month = now.getMonth() + 1;
-    matchStage.year = now.getFullYear();
+    matchStage.year  = now.getFullYear();
   } else if (period === 'week') {
-    const now = new Date();
-    const oneJan = new Date(now.getFullYear(), 0, 1);
-    const numberOfDays = Math.floor((now - oneJan) / (24 * 60 * 60 * 1000));
-    const currentWeek = Math.ceil((numberOfDays + oneJan.getDay() + 1) / 7);
-    
-    matchStage.weekNumber = currentWeek;
-    matchStage.year = now.getFullYear();
+    matchStage.weekNumber = getWeekNumber(now);
+    matchStage.year       = now.getFullYear();
   }
 
   const stats = await this.aggregate([
     { $match: matchStage },
     {
       $group: {
-        _id: null,
-        totalSessions: { $sum: 1 },
-        presentCount: {
-          $sum: { $cond: [{ $eq: ['$status', true] }, 1, 0] },
-        },
-        absentCount: {
-          $sum: { $cond: [{ $eq: ['$status', false] }, 1, 0] },
-        },
-        justifiedAbsences: {
-          $sum: { $cond: ['$isJustified', 1, 0] },
-        },
+        _id:              null,
+        totalSessions:    { $sum: 1 },
+        presentCount:     { $sum: { $cond: [{ $eq: ['$status', true] }, 1, 0] } },
+        absentCount:      { $sum: { $cond: [{ $eq: ['$status', false] }, 1, 0] } },
+        justifiedAbsences:{ $sum: { $cond: ['$isJustified', 1, 0] } },
       },
     },
     {
       $project: {
-        _id: 0,
-        totalSessions: 1,
-        presentCount: 1,
-        absentCount: 1,
-        justifiedAbsences: 1,
-        unjustifiedAbsences: {
-          $subtract: ['$absentCount', '$justifiedAbsences'],
-        },
+        _id:                 0,
+        totalSessions:       1,
+        presentCount:        1,
+        absentCount:         1,
+        justifiedAbsences:   1,
+        unjustifiedAbsences: { $subtract: ['$absentCount', '$justifiedAbsences'] },
         attendanceRate: {
-          $multiply: [
-            { $divide: ['$presentCount', '$totalSessions'] },
-            100,
+          $cond: [
+            { $gt: ['$totalSessions', 0] },
+            { $multiply: [{ $divide: ['$presentCount', '$totalSessions'] }, 100] },
+            0,
           ],
         },
       },
@@ -490,42 +370,42 @@ studentAttendanceSchema.statics.getStudentStats = async function(
   ]);
 
   return stats[0] || {
-    totalSessions: 0,
-    presentCount: 0,
-    absentCount: 0,
-    justifiedAbsences: 0,
+    totalSessions:       0,
+    presentCount:        0,
+    absentCount:         0,
+    justifiedAbsences:   0,
     unjustifiedAbsences: 0,
-    attendanceRate: 0,
+    attendanceRate:      0,
   };
 };
 
 /**
- * Calculate attendance statistics for a class
+ * Statistiques de présence pour une classe.
+ * @param {ObjectId} classId
+ * @param {Date}     [date]
+ * @param {string}   period  – 'day' | 'week' | 'month' | 'year'
  */
-studentAttendanceSchema.statics.getClassStats = async function(
+studentAttendanceSchema.statics.getClassStats = async function (
   classId,
   date = null,
-  period = 'day' // 'day', 'week', 'month', 'year'
+  period = 'day'
 ) {
-  const matchStage = { class: mongoose.Types.ObjectId(classId) };
+  const matchStage = { class: new mongoose.Types.ObjectId(classId) };
 
   if (date) {
-    const targetDate = new Date(date);
-    
+    const d = new Date(date);
     if (period === 'day') {
-      const startOfDay = new Date(targetDate);
-      startOfDay.setHours(0, 0, 0, 0);
-      const endOfDay = new Date(targetDate);
-      endOfDay.setHours(23, 59, 59, 999);
-      matchStage.attendanceDate = { $gte: startOfDay, $lte: endOfDay };
+      const start = new Date(d); start.setHours(0, 0, 0, 0);
+      const end   = new Date(d); end.setHours(23, 59, 59, 999);
+      matchStage.attendanceDate = { $gte: start, $lte: end };
     } else if (period === 'week') {
-      matchStage.weekNumber = targetDate.getWeekNumber();
-      matchStage.year = targetDate.getFullYear();
+      matchStage.weekNumber = getWeekNumber(d);
+      matchStage.year       = d.getFullYear();
     } else if (period === 'month') {
-      matchStage.month = targetDate.getMonth() + 1;
-      matchStage.year = targetDate.getFullYear();
+      matchStage.month = d.getMonth() + 1;
+      matchStage.year  = d.getFullYear();
     } else if (period === 'year') {
-      matchStage.year = targetDate.getFullYear();
+      matchStage.year = d.getFullYear();
     }
   }
 
@@ -533,16 +413,16 @@ studentAttendanceSchema.statics.getClassStats = async function(
     { $match: matchStage },
     {
       $group: {
-        _id: '$student',
-        totalSessions: { $sum: 1 },
+        _id:          '$student',
+        totalSessions:{ $sum: 1 },
         presentCount: { $sum: { $cond: ['$status', 1, 0] } },
-        absentCount: { $sum: { $cond: [{ $not: '$status' }, 1, 0] } },
+        absentCount:  { $sum: { $cond: [{ $not: '$status' }, 1, 0] } },
       },
     },
     {
       $group: {
-        _id: null,
-        totalStudents: { $sum: 1 },
+        _id:               null,
+        totalStudents:     { $sum: 1 },
         avgAttendanceRate: {
           $avg: {
             $multiply: [{ $divide: ['$presentCount', '$totalSessions'] }, 100],
@@ -557,33 +437,26 @@ studentAttendanceSchema.statics.getClassStats = async function(
 };
 
 /**
- * Get attendance for today's schedule
+ * Présences du jour pour une séance et une classe données.
+ * @param {ObjectId} scheduleId
+ * @param {ObjectId} classId
+ * @param {Date}     [date=new Date()]
  */
-studentAttendanceSchema.statics.getTodayAttendance = async function(
+studentAttendanceSchema.statics.getTodayAttendance = async function (
   scheduleId,
   classId,
   date = new Date()
 ) {
-  const startOfDay = new Date(date);
-  startOfDay.setHours(0, 0, 0, 0);
-  
-  const endOfDay = new Date(date);
-  endOfDay.setHours(23, 59, 59, 999);
+  const start = new Date(date); start.setHours(0, 0, 0, 0);
+  const end   = new Date(date); end.setHours(23, 59, 59, 999);
 
   return this.find({
-    schedule: scheduleId,
-    class: classId,
-    attendanceDate: { $gte: startOfDay, $lte: endOfDay },
+    schedule:       scheduleId,
+    class:          classId,
+    attendanceDate: { $gte: start, $lte: end },
   })
     .populate('student', 'firstName lastName email profileImage')
     .sort({ 'student.lastName': 1 });
-};
-
-// Helper for week number calculation
-Date.prototype.getWeekNumber = function() {
-  const oneJan = new Date(this.getFullYear(), 0, 1);
-  const numberOfDays = Math.floor((this - oneJan) / (24 * 60 * 60 * 1000));
-  return Math.ceil((numberOfDays + oneJan.getDay() + 1) / 7);
 };
 
 const StudentAttendance = mongoose.model('StudentAttendance', studentAttendanceSchema);
