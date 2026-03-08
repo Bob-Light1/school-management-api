@@ -276,6 +276,7 @@ const getMyAttendance = asyncHandler(async (req, res) => {
   if (!semester)     return sendError(res, 400, 'semester is required.');
 
   // JWT: req.user.id (string) et req.user.campusId (string)
+  if (!req.user.campusId) return sendForbidden(res, 'Campus information not found.');
   const filter = {
     teacher:      new mongoose.Types.ObjectId(req.user.id),
     schoolCampus: new mongoose.Types.ObjectId(req.user.campusId),

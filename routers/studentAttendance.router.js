@@ -116,6 +116,22 @@ router.patch(
 );
 
 // ─────────────────────────────────────────────
+// ROUTES ADMINISTRATIVES
+// ─────────────────────────────────────────────
+
+/**
+ * PATCH /api/attendance/student/lock-daily
+ * Verrouille toutes les présences étudiantes d'une date sur le campus.
+ * Body : { date? } – défaut : aujourd'hui
+ */
+router.patch(
+  '/lock-daily',
+  authorize(['CAMPUS_MANAGER', 'ADMIN', 'DIRECTOR']),
+  lockDailyAttendance
+);
+
+
+// ─────────────────────────────────────────────
 // ROUTES SUR UN ENREGISTREMENT INDIVIDUEL
 // ─────────────────────────────────────────────
 
@@ -139,21 +155,6 @@ router.patch(
   '/:attendanceId/justify',
   authorize(['CAMPUS_MANAGER', 'TEACHER', 'ADMIN', 'DIRECTOR']),
   justifyAbsence
-);
-
-// ─────────────────────────────────────────────
-// ROUTES ADMINISTRATIVES
-// ─────────────────────────────────────────────
-
-/**
- * PATCH /api/attendance/student/lock-daily
- * Verrouille toutes les présences étudiantes d'une date sur le campus.
- * Body : { date? } – défaut : aujourd'hui
- */
-router.patch(
-  '/lock-daily',
-  authorize(['CAMPUS_MANAGER', 'ADMIN', 'DIRECTOR']),
-  lockDailyAttendance
 );
 
 // ─────────────────────────────────────────────

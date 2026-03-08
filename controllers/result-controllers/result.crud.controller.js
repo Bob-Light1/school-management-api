@@ -19,7 +19,8 @@ const mongoose = require('mongoose');
 const { parse: csvParse } = require('csv-parse/sync');
 
 const { Result, RESULT_STATUS, EVALUATION_TYPE, SEMESTER } = require('../../models/result.model');
-const Class = require('../../models/class.model');
+const Class   = require('../../models/class.model');
+const Student = require('../../models/student.model');
 
 const {
   asyncHandler,
@@ -158,13 +159,31 @@ const bulkCreateResults = asyncHandler(async (req, res) => {
   if (!maxScore || Number(maxScore) < 1) return sendError(res, 400, 'maxScore must be at least 1.');
   if (!evaluationTitle?.trim()) return sendError(res, 400, 'evaluationTitle is required.');
 
-  // Vérification que la classe appartient au campus
-  const classDoc = await Class.findById(classId).select('schoolCampus students').lean();
+  // Verify the class belongs to the campus
+  const classDoc = await Class.findById(classId).select('schoolCampus').lean();
   if (!classDoc) return sendNotFound(res, 'Class');
   if (!isGlobalRole(req.user.role) && classDoc.schoolCampus.toString() !== resolvedCampus.toString())
     return sendForbidden(res, 'Class does not belong to your campus.');
 
-  const enrolledIds = new Set(classDoc.students.map((s) => s.toString()));
+  /*
+   * Build enrollment set from the Student collection directly.
+   *
+   * Rationale: classDoc.students[] (the array stored on the Class document)
+   * may be empty or out-of-sync if students were created without an explicit
+   * push onto that array (e.g. via the generic student controller which only
+   * sets studentClass on the Student document). The authoritative source of
+   * enrollment is Student.studentClass, not Class.students[].
+   *
+   * Campus isolation is enforced by filtering on schoolCampus as well.
+   */
+  const enrolledDocs = await Student.find(
+    {
+      studentClass: new mongoose.Types.ObjectId(classId),
+      schoolCampus: new mongoose.Types.ObjectId(resolvedCampus),
+    },
+    { _id: 1 }
+  ).lean();
+  const enrolledIds = new Set(enrolledDocs.map((s) => s._id.toString()));
   const errors      = [];
   const toInsert    = [];
 

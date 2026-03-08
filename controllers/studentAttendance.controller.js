@@ -87,6 +87,7 @@ const initSessionAttendance = asyncHandler(async (req, res) => {
           schedule:         new mongoose.Types.ObjectId(scheduleId),
           class:            new mongoose.Types.ObjectId(classId),
           schoolCampus:     new mongoose.Types.ObjectId(campusId),
+          subject: req.body.subjectId ? new mongoose.Types.ObjectId(req.body.subjectId) : undefined,
           attendanceDate:   sessionDate,
           academicYear,
           semester,

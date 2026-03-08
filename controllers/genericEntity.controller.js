@@ -186,8 +186,10 @@ class GenericEntityController {
       await session.commitTransaction();
 
       // ── 10. Hook afterCreate (outside the transaction, non-blocking) ──
+      // `fields` is forwarded so hooks (e.g. teacher) can access extra payload
+      // values such as `classManagerOf` that are not stored on the document.
       if (this.afterCreate) {
-        this.afterCreate(savedEntity).catch(err =>
+        this.afterCreate(savedEntity, fields).catch(err =>
           console.error('Non-critical error in afterCreate:', err)
         );
       }
@@ -405,6 +407,9 @@ class GenericEntityController {
       if (updates.email)    updates.email    = updates.email.toLowerCase();
       if (updates.username) updates.username = updates.username.toLowerCase();
 
+      // Snapshot the entity state BEFORE the update so afterUpdate can diff class lists
+      const previousData = entity.toObject();
+
       let updatedEntity = await this.Model.findByIdAndUpdate(
         id,
         updates,
@@ -415,7 +420,8 @@ class GenericEntityController {
       updatedEntity = updatedEntity.toObject();
 
       if (this.afterUpdate) {
-        await this.afterUpdate(updatedEntity).catch(err =>
+        // `fields` and `previousData` are forwarded so hooks can diff old vs new state
+        this.afterUpdate(updatedEntity, fields, previousData).catch(err =>
           console.error('Non-critical error in afterUpdate:', err)
         );
       }

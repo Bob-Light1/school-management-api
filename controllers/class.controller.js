@@ -33,24 +33,21 @@ exports.createClass = async (req, res) => {
       room
     } = req.body;
 
-    // Validate required fields
     if (!schoolCampus || !level || !className) {
       return sendError(res, 400, 'Campus, level, and class name are required');
     }
 
-    // Validate ObjectIds
     if (!isValidObjectId(schoolCampus) || !isValidObjectId(level)) {
       return sendError(res, 400, 'Invalid campus or level ID format');
     }
 
-    // Campus isolation enforcement : CAMPUS_MANAGER can only create classes in their own campus
+    // Campus isolation: CAMPUS_MANAGER can only create classes in their own campus
     if (req.user.role === 'CAMPUS_MANAGER') {
       if (req.user.campusId !== schoolCampus) {
         return sendError(res, 403, 'You can only create classes in your own campus');
       }
     }
 
-    // Validate class manager belongs to the same campus (if provided)
     if (classManager) {
       if (!isValidObjectId(classManager)) {
         return sendError(res, 400, 'Invalid class manager ID format');
@@ -60,13 +57,12 @@ exports.createClass = async (req, res) => {
         _id: classManager,
         schoolCampus: schoolCampus
       }).select('_id');
-      
+
       if (!teacher) {
         return sendError(res, 400, 'Teacher not found or does not belong to campus');
       }
     }
 
-    // Check for duplicate class (same campus + level + name)
     const existingClass = await Class.findOne({
       schoolCampus,
       level,
@@ -77,7 +73,6 @@ exports.createClass = async (req, res) => {
       return sendConflict(res, 'A class with this name already exists for this level and campus');
     }
 
-    // Check campus capacity
     const campus = await Campus.findById(schoolCampus);
     if (campus) {
       const canAdd = await campus.canAddClass();
@@ -86,7 +81,6 @@ exports.createClass = async (req, res) => {
       }
     }
 
-    // Create the class
     const newClass = await Class.create({
       schoolCampus,
       level,
@@ -97,7 +91,6 @@ exports.createClass = async (req, res) => {
       room
     });
 
-    // Populate for response
     const populatedClass = await Class.findById(newClass._id)
       .populate('schoolCampus', 'campus_name')
       .populate('level', 'name description')
@@ -109,12 +102,10 @@ exports.createClass = async (req, res) => {
   } catch (error) {
     console.error('❌ createClass error:', error);
 
-    // Handle duplicate key errors
     if (error.code === 11000) {
       return handleDuplicateKeyError(res, error);
     }
 
-    // Handle validation errors
     if (error.name === 'ValidationError') {
       const messages = Object.values(error.errors).map(err => err.message);
       return sendError(res, 400, 'Validation failed', { errors: messages });
@@ -141,7 +132,6 @@ exports.getAllClass = async (req, res) => {
       includeArchived,
     } = req.query;
 
-    // Build campus filter based on user role
     const filter = buildCampusFilter(req.user, campusId);
 
     if (includeArchived !== 'true') {
@@ -150,21 +140,18 @@ exports.getAllClass = async (req, res) => {
       filter.status = status;
     }
 
-    // Additional filters
     if (level && isValidObjectId(level)) {
       filter.level = level;
     }
 
-    // Search by class name
     if (search) {
       filter.className = { $regex: search, $options: 'i' };
     }
 
     const pageNumber = parseInt(page, 10);
-    const pageSize = parseInt(limit, 10);
-    const skip = (pageNumber - 1) * pageSize;
+    const pageSize   = parseInt(limit, 10);
+    const skip       = (pageNumber - 1) * pageSize;
 
-    // Fetch classes with population
     const classes = await Class.find(filter)
       .populate('schoolCampus', 'campus_name')
       .populate('level', 'name description')
@@ -199,12 +186,10 @@ exports.getClassById = async (req, res) => {
   try {
     const classId = req.params.id;
 
-    // Validate ObjectId
     if (!isValidObjectId(classId)) {
       return sendError(res, 400, 'Invalid class ID format');
     }
 
-    // Find class with populated fields
     const classData = await Class.findById(classId)
       .populate('schoolCampus', 'campus_name campus_number location')
       .populate('level', 'name description')
@@ -216,7 +201,6 @@ exports.getClassById = async (req, res) => {
       return sendNotFound(res, 'Class');
     }
 
-    // Campus isolation check
     if (req.user.role === 'CAMPUS_MANAGER') {
       if (classData.schoolCampus._id.toString() !== req.user.campusId) {
         return sendError(res, 403, 'You can only access classes from your own campus');
@@ -241,27 +225,23 @@ exports.getClassesByCampus = async (req, res) => {
     const { campusId } = req.params;
     const { status, includeArchived } = req.query;
 
-    // Validate ObjectId
     if (!isValidObjectId(campusId)) {
       return sendError(res, 400, 'Invalid campus ID format');
     }
 
-    // Campus isolation check
     if (req.user.role === 'CAMPUS_MANAGER') {
       if (req.user.campusId !== campusId) {
         return sendError(res, 403, 'You can only access classes from your own campus');
       }
     }
 
-    // Build filter
     const filter = { schoolCampus: campusId };
     if (includeArchived !== 'true') {
-      filter.status = 'active'; 
+      filter.status = 'active';
     } else if (status) {
       filter.status = status;
     }
 
-    // Fetch classes
     const classes = await Class.find(filter)
       .populate('schoolCampus', 'campus_name email')
       .populate('level', 'name description')
@@ -278,31 +258,62 @@ exports.getClassesByCampus = async (req, res) => {
 };
 
 /**
- * @desc    Get all classes managed by a specific teacher
+ * @desc    Get all classes associated with a specific teacher.
+ *
+ * A teacher is associated with a class in two possible ways:
+ *  1. They are the `classManager` (main teacher in charge).
+ *  2. They are listed in the class `teachers[]` array (subject teacher).
+ *
+ * Both relationships are queried with a single $or filter to avoid
+ * returning an empty list when the teacher is not a classManager.
+ *
+ * Campus isolation is enforced: the teacher's own campusId from the JWT
+ * is used to scope the query — the caller cannot impersonate another campus.
+ *
  * @route   GET /api/class/teacher/:teacherId
  * @access  ADMIN, DIRECTOR, CAMPUS_MANAGER, TEACHER
  */
 exports.getClassesByTeacher = async (req, res) => {
   try {
     const { teacherId } = req.params;
-    const { status } = req.query;
 
-    // Validate ObjectId
     if (!isValidObjectId(teacherId)) {
       return sendError(res, 400, 'Invalid teacher ID format');
     }
 
-    // Build filter
-    const filter = { classManager: teacherId };
-    if (status) {
-      filter.status = status;
-    }
+    // Campus isolation: teachers can only query their own campus.
+    // ADMIN / DIRECTOR may query any teacher but we still scope by the
+    // teacher's actual campus to avoid leaking cross-campus data.
+    let campusFilter = {};
 
-    // Fetch classes
+    if (req.user.role === 'TEACHER') {
+      // A teacher can only retrieve classes from their own campus.
+      // Requesting classes for another teacher's ID is also blocked here
+      // because the JWT campusId is always injected server-side.
+      if (req.user.id.toString() !== teacherId.toString()) {
+        return sendError(res, 403, 'You can only retrieve your own classes');
+      }
+      campusFilter = { schoolCampus: req.user.campusId };
+    } else if (req.user.role === 'CAMPUS_MANAGER') {
+      campusFilter = { schoolCampus: req.user.campusId };
+    }
+    // ADMIN / DIRECTOR: no campus restriction
+
+    // Include classes where the teacher is classManager OR listed in teachers[]
+    const filter = {
+      ...campusFilter,
+      status: { $ne: 'archived' },
+      $or: [
+        { classManager: teacherId },
+        { teachers:     teacherId },
+      ],
+    };
+
     const classes = await Class.find(filter)
       .populate('schoolCampus', 'campus_name')
       .populate('level', 'name description')
-      .sort({ level: 1, className: 1 })
+      .populate('classManager', 'firstName lastName email')
+      .sort({ className: 1 })
       .lean();
 
     return sendSuccess(res, 200, 'Teacher classes retrieved successfully', classes);
@@ -322,19 +333,16 @@ exports.updateClass = async (req, res) => {
   try {
     const classId = req.params.id;
 
-    // Validate ObjectId
     if (!isValidObjectId(classId)) {
       return sendError(res, 400, 'Invalid class ID format');
     }
 
-    // Find existing class
     const existingClass = await Class.findById(classId);
 
     if (!existingClass) {
       return sendNotFound(res, 'Class');
     }
 
-    // Campus isolation check
     if (req.user.role === 'CAMPUS_MANAGER') {
       if (existingClass.schoolCampus.toString() !== req.user.campusId) {
         return sendError(res, 403, 'You can only update classes from your own campus');
@@ -352,7 +360,6 @@ exports.updateClass = async (req, res) => {
       room
     } = req.body;
 
-    // Validate class manager belongs to same campus (if being updated)
     if (classManager && classManager !== existingClass.classManager?.toString()) {
       if (!isValidObjectId(classManager)) {
         return sendError(res, 400, 'Invalid class manager ID format');
@@ -360,19 +367,18 @@ exports.updateClass = async (req, res) => {
 
       const campusToCheck = schoolCampus || existingClass.schoolCampus;
       const isValid = await validateTeacherBelongsToCampus(classManager, campusToCheck);
-      
+
       if (!isValid) {
         return sendError(res, 400, 'Class manager must belong to the same campus');
       }
     }
 
-    // Check for duplicates (if campus, level, or name is changing)
     if (schoolCampus || level || className) {
       const duplicateClass = await Class.findOne({
         _id: { $ne: classId },
         schoolCampus: schoolCampus || existingClass.schoolCampus,
-        level: level || existingClass.level,
-        className: className ? className.trim() : existingClass.className
+        level:        level        || existingClass.level,
+        className:    className    ? className.trim() : existingClass.className
       });
 
       if (duplicateClass) {
@@ -380,20 +386,17 @@ exports.updateClass = async (req, res) => {
       }
     }
 
-    // Update allowed fields
-    if (schoolCampus) existingClass.schoolCampus = schoolCampus;
-    if (level) existingClass.level = level;
-    if (className) existingClass.className = className.trim();
+    if (schoolCampus)              existingClass.schoolCampus = schoolCampus;
+    if (level)                     existingClass.level        = level;
+    if (className)                 existingClass.className    = className.trim();
     if (classManager !== undefined) existingClass.classManager = classManager;
-    if (status) existingClass.status = status;
-    if (maxStudents) existingClass.maxStudents = maxStudents;
+    if (status)                    existingClass.status       = status;
+    if (maxStudents)               existingClass.maxStudents  = maxStudents;
     if (academicYear !== undefined) existingClass.academicYear = academicYear;
-    if (room !== undefined) existingClass.room = room;
+    if (room !== undefined)         existingClass.room         = room;
 
-    // Save
     const updatedClass = await existingClass.save();
 
-    // Populate for response
     const populatedClass = await Class.findById(updatedClass._id)
       .populate('schoolCampus', 'campus_name')
       .populate('level', 'name description')
@@ -427,31 +430,26 @@ exports.deleteClass = async (req, res) => {
   try {
     const classId = req.params.id;
 
-    // Validate ObjectId
     if (!isValidObjectId(classId)) {
       return sendError(res, 400, 'Invalid class ID format');
     }
 
-    // Find the class
     const existingClass = await Class.findById(classId);
 
     if (!existingClass) {
       return sendNotFound(res, 'Class');
     }
 
-    // Campus isolation check
     if (req.user.role === 'CAMPUS_MANAGER') {
       if (existingClass.schoolCampus.toString() !== req.user.campusId) {
         return sendError(res, 403, 'You can only archive classes from your own campus');
       }
     }
 
-    // Check if already archived
     if (existingClass.status === 'archived') {
       return sendError(res, 400, 'Class is already archived');
     }
 
-    // Soft delete
     existingClass.status = 'archived';
     await existingClass.save();
 
@@ -472,35 +470,29 @@ exports.restoreClass = async (req, res) => {
   try {
     const classId = req.params.id;
 
-    // Validate ObjectId
     if (!isValidObjectId(classId)) {
       return sendError(res, 400, 'Invalid class ID format');
     }
 
-    // Find the class
     const existingClass = await Class.findById(classId);
 
     if (!existingClass) {
       return sendNotFound(res, 'Class');
     }
 
-    // Campus isolation check
     if (req.user.role === 'CAMPUS_MANAGER') {
       if (existingClass.schoolCampus.toString() !== req.user.campusId) {
         return sendError(res, 403, 'You can only restore classes from your own campus');
       }
     }
 
-    // Check if not archived
     if (existingClass.status !== 'archived') {
       return sendError(res, 400, 'Class is not archived');
     }
 
-    // Restore
     existingClass.status = 'active';
     await existingClass.save();
 
-    // Populate for response
     const populatedClass = await Class.findById(existingClass._id)
       .populate('schoolCampus', 'campus_name')
       .populate('level', 'name description')
@@ -513,4 +505,3 @@ exports.restoreClass = async (req, res) => {
     return sendError(res, 500, 'Failed to restore class');
   }
 };
-

@@ -437,7 +437,7 @@ ResultSchema.virtual('weightedNormalizedScore').get(function () {
 
 // ─── PRE-SAVE ─────────────────────────────────────────────────────────────────
 
-ResultSchema.pre('save', async function (next) {
+ResultSchema.pre('save', async function () {
   try {
 
     // ── 1. [S2-2] Référence unique atomique ──────────────────────────────────
@@ -499,9 +499,8 @@ ResultSchema.pre('save', async function (next) {
       this.normalizedScore = 0;
     }
 
-    next();
   } catch (err) {
-    next(err);
+    throw err;
   }
 });
 
