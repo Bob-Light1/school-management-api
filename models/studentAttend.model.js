@@ -186,27 +186,25 @@ studentAttendanceSchema.index({ schoolCampus: 1, year: 1, month: 1, weekNumber: 
 // PRE-SAVE MIDDLEWARE
 // ─────────────────────────────────────────────
 
-studentAttendanceSchema.pre('save', function (next) {
-  try {
-    if (this.attendanceDate) {
-      const d      = new Date(this.attendanceDate);
-      this.month   = d.getMonth() + 1;
-      this.year    = d.getFullYear();
-      this.weekNumber = getWeekNumber(d);
-    }
+studentAttendanceSchema.pre('save', function () {
+  // Recompute temporal fields only when the date actually changes
+  if (this.attendanceDate && (this.isNew || this.isModified('attendanceDate'))) {
+    const d         = new Date(this.attendanceDate);
+    this.month      = d.getMonth() + 1;
+    this.year       = d.getFullYear();
+    this.weekNumber = getWeekNumber(d);
+  }
 
-    // Empêcher la modification d'un enregistrement verrouillé
-    if (!this.isNew && this.isLocked && this.isModified('status')) {
-      return next(new Error('Cannot modify locked attendance record. Add justification instead.'));
-    }
+  // Prevent status changes on locked records — throw propagates to .save() caller
+  if (!this.isNew && this.isLocked && this.isModified('status')) {
+    throw new Error(
+      'Cannot modify locked attendance record. Add justification instead.'
+    );
+  }
 
-    if (this.isModified('status') || this.isModified('justification')) {
-      this.lastModifiedAt = new Date();
-    }
-
-    next();
-  } catch (error) {
-    next(error);
+  // Track last modification timestamp
+  if (this.isModified('status') || this.isModified('justification')) {
+    this.lastModifiedAt = new Date();
   }
 });
 

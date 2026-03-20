@@ -202,33 +202,29 @@ teacherAttendanceSchema.index({ schoolCampus: 1, year: 1, month: 1, isPaid: 1 })
 // PRE-SAVE MIDDLEWARE
 // ─────────────────────────────────────────────
 
-teacherAttendanceSchema.pre('save', function (next) {
-  try {
-    if (this.attendanceDate) {
-      const d      = new Date(this.attendanceDate);
-      this.month   = d.getMonth() + 1;
-      this.year    = d.getFullYear();
-      this.weekNumber = getWeekNumber(d);
-    }
+teacherAttendanceSchema.pre('save', function () {
+  if (this.attendanceDate && (this.isNew || this.isModified('attendanceDate'))) {
+    const d         = new Date(this.attendanceDate);
+    this.month      = d.getMonth() + 1;
+    this.year       = d.getFullYear();
+    this.weekNumber = getWeekNumber(d);
+  }
 
-    // Calcul automatique de la durée
-    if (this.sessionStartTime && this.sessionEndTime) {
-      const [sh, sm] = this.sessionStartTime.split(':').map(Number);
-      const [eh, em] = this.sessionEndTime.split(':').map(Number);
-      this.sessionDuration = (eh * 60 + em) - (sh * 60 + sm);
-    }
+  if (this.sessionStartTime && this.sessionEndTime &&
+      (this.isNew || this.isModified('sessionStartTime') || this.isModified('sessionEndTime'))) {
+    const [sh, sm] = this.sessionStartTime.split(':').map(Number);
+    const [eh, em] = this.sessionEndTime.split(':').map(Number);
+    this.sessionDuration = (eh * 60 + em) - (sh * 60 + sm);
+  }
 
-    if (!this.isNew && this.isLocked && this.isModified('status')) {
-      return next(new Error('Cannot modify locked attendance. Add justification instead.'));
-    }
+  if (!this.isNew && this.isLocked && this.isModified('status')) {
+    throw new Error(
+      'Cannot modify locked attendance. Add justification instead.'
+    );
+  }
 
-    if (this.isModified('status') || this.isModified('justification')) {
-      this.lastModifiedAt = new Date();
-    }
-
-    next();
-  } catch (error) {
-    next(error);
+  if (this.isModified('status') || this.isModified('justification')) {
+    this.lastModifiedAt = new Date();
   }
 });
 
