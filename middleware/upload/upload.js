@@ -206,12 +206,24 @@ const uploadProfileImage = multer({
 }).single('profileImage');
 
 /**
- * Upload a campus cover image.
+ * Upload a campus cover image — CloudinaryStorage path (used for updates).
  * Field name: 'campus_image'
  * Limit: 5 MB
  */
 const uploadCampusImage = multer({
   storage    : IS_PRODUCTION ? cloudinaryImageStorage : buildLocalDiskStorage('campuses'),
+  limits     : { fileSize: MAX_FILE_SIZE, files: 1 },
+  fileFilter : imageFilter,
+}).single('campus_image');
+
+/**
+ * Campus image upload — memory storage path (used for creation).
+ * In production the file lands in req.file.buffer so the controller can
+ * call uploadBufferToCloudinary() with an explicit timeout.
+ * In development the file is still written to disk as usual.
+ */
+const uploadCampusImageMemory = multer({
+  storage    : IS_PRODUCTION ? multer.memoryStorage() : buildLocalDiskStorage('campuses'),
   limits     : { fileSize: MAX_FILE_SIZE, files: 1 },
   fileFilter : imageFilter,
 }).single('campus_image');
@@ -300,13 +312,69 @@ const getFileUrl = (file) => {
   return `${baseUrl}/uploads/${publicPath}`;
 };
 
+/**
+ * Upload a file buffer directly to Cloudinary with a hard timeout.
+ * Replaces the multer-storage-cloudinary streaming path for campus creation
+ * so the controller keeps full control over the upload and can surface a
+ * clear error instead of hanging indefinitely.
+ *
+ * @param {Express.Multer.File} file   - Multer memory file (must have .buffer)
+ * @param {string}              folder - Cloudinary destination folder
+ * @param {number}             [ms]    - Timeout in ms (default 30 000)
+ * @returns {Promise<string>}            Cloudinary secure_url
+ */
+const uploadBufferToCloudinary = (file, folder, ms = 30_000) =>
+  new Promise((resolve, reject) => {
+    if (!file?.buffer) {
+      return reject(new Error('File buffer is missing — cannot upload to Cloudinary.'));
+    }
+
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('Cloudinary upload timed out after 30 s. Please try again.'));
+    }, ms);
+
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        resource_type   : 'image',
+        allowed_formats : ['jpg', 'jpeg', 'png', 'webp'],
+        public_id       : buildPublicId(file),
+        transformation  : [{ quality: 'auto', fetch_format: 'auto' }],
+      },
+      (error, result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      },
+    );
+
+    stream.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    stream.end(file.buffer);
+  });
+
 // ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
   // Multer middleware (one name per responsibility)
   uploadProfileImage,
   uploadCampusImage,
+  uploadCampusImageMemory,
   uploadDocument,
+
+  // Cloudinary direct upload with timeout (used by campus.controller create)
+  uploadBufferToCloudinary,
 
   // Error handling
   handleMulterError,

@@ -25,9 +25,10 @@ const { authenticate, authorize } = require('../middleware/auth/auth');
 const { loginLimiter, strictLimiter, apiLimiter } = require('../middleware/rate-limiter/rate-limiter');
 
 // MULTER: Import upload middleware
-const { 
-  uploadCampusImage, 
-  handleMulterError 
+const {
+  uploadCampusImage,
+  uploadCampusImageMemory,
+  handleMulterError
 } = require('../middleware/upload/upload');
 
 const router = express.Router();
@@ -67,11 +68,11 @@ router.use(authenticate);
  * @access  ADMIN, DIRECTOR only
  */
 router.post(
-  "/create", 
+  "/create",
   strictLimiter,
   authorize(['ADMIN', 'DIRECTOR']),
-  uploadCampusImage,     // Multer middleware handles image upload
-  handleMulterError,     // Multer error handler
+  uploadCampusImageMemory, // Memory storage — controller uploads to Cloudinary with timeout
+  handleMulterError,
   createCampus
 );
 
