@@ -146,7 +146,11 @@ class CampusController extends GenericEntityController {
       }
       
       // Handle image
-      const campus_image = req.file.filename;
+      if (!req.file) {
+        await session.abortTransaction();
+        return sendError(res, 400, 'Campus image is required and upload failed. Please try again.');
+      }
+      const campus_image = getFileUrl(req.file);
       
       // Handle location
       const location = parseLocation(fields);

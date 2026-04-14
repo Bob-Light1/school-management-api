@@ -14,6 +14,9 @@ const app = express();
 // ENVIRONMENT VALIDATION
 // ========================================
 const requiredEnvVars = ['MONGODB_URI', 'JWT_SECRET'];
+if (process.env.NODE_ENV === 'production') {
+  requiredEnvVars.push('CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET');
+}
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingEnvVars.length > 0) {
