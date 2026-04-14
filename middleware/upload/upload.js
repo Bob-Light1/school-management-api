@@ -1,476 +1,322 @@
+'use strict';
+
 /**
- * UPLOAD MIDDLEWARE - MULTER CONFIGURATION (FIXED)
+ * @file upload.js
+ * @description Multer middleware — Cloudinary (production) / local disk (development).
+ *
+ * Strategy
+ * ─────────────────────────────────────────────────────────────────────────────
+ * • NODE_ENV=production → all persistent uploads go to Cloudinary.
+ *   Render.com has an ephemeral filesystem: local files are wiped on every
+ *   redeploy, so Cloudinary is the only safe store for images/PDFs.
+ * • NODE_ENV=development → files land on local disk for fast iteration
+ *   without consuming Cloudinary bandwidth.
+ *
+ * Two dedicated storages are provided:
+ *   imageStorage   — JPEG/PNG/WEBP images (profiles, campus photos)
+ *   documentStorage — PDF documents only
+ *   csvMemoryStorage — CSV/Excel import files (always memory, never stored)
+ *
+ * CSV/Excel import files intentionally use multer.memoryStorage() in both
+ * environments because they are parsed in-process and must never be written
+ * to disk or Cloudinary.
+ *
+ * Exports (one name per responsibility — no ambiguous duplicates):
+ *   uploadProfileImage   — single('profileImage')
+ *   uploadCampusImage    — single('campus_image')
+ *   uploadDocument       — single('document')  → PDF only
+ *   handleMulterError    — Express error middleware
+ *   cleanupUploadedFile  — Delete a local temp file on error (dev only)
+ *   getFileUrl           — Build a public URL from a local Multer file object
  */
 
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs').promises;
-const crypto = require('crypto');
+const multer   = require('multer');
+const path     = require('path');
+const fs       = require('fs').promises;
+const crypto   = require('crypto');
+const cloudinary           = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// ========================================
-// CONFIGURATION
-// ========================================
+// ── Environment ───────────────────────────────────────────────────────────────
 
-const UPLOAD_PATHS = {
-  students: process.env.STUDENT_IMAGE_PATH || 'uploads/students',
-  teachers: process.env.TEACHER_IMAGE_PATH || 'uploads/teachers',
-  parents: process.env.PARENT_IMAGE_PATH || 'uploads/parents',
-  campuses: process.env.CAMPUS_IMAGE_PATH || 'uploads/campuses',
-  documents: process.env.DOCUMENT_PATH || 'uploads/documents',
-  temp: 'uploads/temp'
-};
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const MAX_FILE_SIZE    = 5  * 1024 * 1024; // 5 MB  — images
+const MAX_PROFILE_SIZE = 2  * 1024 * 1024; // 2 MB  — profile images
+const MAX_DOC_SIZE     = 10 * 1024 * 1024; // 10 MB — PDF documents
+
+// Base upload directory used only in development
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', '..', 'uploads');
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-const MAX_PROFILE_SIZE = 2 * 1024 * 1024; // 2MB
 
-// Ensure upload directories exist
-const ensureUploadDirs = async () => {
-  const dirs = [
-    `${UPLOAD_DIR}/campuses`,
-    `${UPLOAD_DIR}/students`,
-    `${UPLOAD_DIR}/teachers`,
-    `${UPLOAD_DIR}/parents`,
-    `${UPLOAD_DIR}/documents`,
-    `${UPLOAD_DIR}/temp`
-  ];
-
-  for (const dir of dirs) {
-    try {
-      await fs.access(dir);
-    } catch {
-      await fs.mkdir(dir, { recursive: true });
-    }
-  }
-};
-
-ensureUploadDirs().catch(console.error);
-
-// ========================================
-// STORAGE STRATEGIES
-// ========================================
-
-/**
- * Local Disk Storage Configuration
- */
-const setUploadFolder = (folder) => (req, res, next) => {
-  req.uploadFolder = folder;
-  next();
-};
-
-const diskStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    let folder = UPLOAD_PATHS.temp;
-    
-    if (req.baseUrl.includes('student')) {
-      folder = UPLOAD_PATHS.students;
-    } else if (req.baseUrl.includes('teacher')) {
-      folder = UPLOAD_PATHS.teachers;
-    } else if (req.baseUrl.includes('parent')) {
-      folder = UPLOAD_PATHS.parents;
-    } else if (req.baseUrl.includes('campus')) {
-      folder = UPLOAD_PATHS.campuses;
-    } else if (file.fieldname === 'profileImage') {
-      
-      folder = req.uploadFolder ? UPLOAD_PATHS[req.uploadFolder] : UPLOAD_PATHS.temp;
-    }
-    
-    cb(null, folder);
-  },
-  
-  filename: (req, file, cb) => {
-    const uniqueId = crypto.randomBytes(16).toString('hex');
-    const timestamp = Date.now();
-    const ext = path.extname(file.originalname || '').toLowerCase();
-    const sanitizedName = (file.originalname || 'file')
-      .replace(ext, '')
-      .replace(/[^a-z0-9]/gi, '-')
-      .toLowerCase()
-      .substring(0, 50);
-    
-    const filename = `${sanitizedName}-${timestamp}-${uniqueId}${ext}`;
-    cb(null, filename);
-  }
+// ── Cloudinary explicit configuration ────────────────────────────────────────
+// The SDK auto-reads CLOUDINARY_URL when present, but explicit configuration
+// is clearer, safer, and easier to audit in production.
+cloudinary.config({
+  cloud_name : process.env.CLOUDINARY_CLOUD_NAME,
+  api_key    : process.env.CLOUDINARY_API_KEY,
+  api_secret : process.env.CLOUDINARY_API_SECRET,
 });
 
-/**
- * Memory Storage
- */
-const memoryStorage = multer.memoryStorage();
+// ── Ensure local upload directories exist (dev only) ─────────────────────────
 
-// ========================================
-// FILE FILTERS (VALIDATION) - FIXED
-// ========================================
+if (!IS_PRODUCTION) {
+  const ensureLocalDirs = async () => {
+    const dirs = [
+      `${UPLOAD_DIR}/campuses`,
+      `${UPLOAD_DIR}/students`,
+      `${UPLOAD_DIR}/teachers`,
+      `${UPLOAD_DIR}/parents`,
+      `${UPLOAD_DIR}/documents`,
+      `${UPLOAD_DIR}/temp`,
+    ];
+    for (const dir of dirs) {
+      try { await fs.access(dir); }
+      catch { await fs.mkdir(dir, { recursive: true }); }
+    }
+  };
+  ensureLocalDirs().catch((err) =>
+    console.error('❌ Failed to create local upload dirs:', err.message)
+  );
+}
+
+// ── Storage: Cloudinary (production) ─────────────────────────────────────────
 
 /**
- * Image File Filter - FIXED VERSION
- * Better error handling and logging
+ * Resolve the Cloudinary folder path from the request context.
+ * Keeps all ForUni assets organised under a single top-level folder.
  */
+const resolveCloudinaryFolder = (req, file) => {
+  if (req.baseUrl?.includes('student'))    return 'backend/students';
+  if (req.baseUrl?.includes('teacher'))    return 'backend/teachers';
+  if (req.baseUrl?.includes('campus'))     return 'backend/campuses';
+  if (req.baseUrl?.includes('parent'))     return 'backend/parents';
+  if (file.mimetype === 'application/pdf') return 'backend/documents';
+  if (file.fieldname === 'profileImage')   return 'backend/profiles';
+  return 'backend/general';
+};
+
+/**
+ * Build a deterministic, URL-safe public_id from the original filename.
+ * A crypto-random suffix prevents collisions even for files with identical names.
+ */
+const buildPublicId = (file) => {
+  const base   = path.basename(file.originalname || 'file', path.extname(file.originalname || ''));
+  const safe   = base.replace(/[^a-z0-9]/gi, '-').toLowerCase().slice(0, 50);
+  const suffix = crypto.randomBytes(8).toString('hex');
+  return `${safe}-${suffix}`;
+};
+
+// Cloudinary storage for images (JPEG/PNG/WEBP)
+const cloudinaryImageStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => ({
+    folder           : resolveCloudinaryFolder(req, file),
+    allowed_formats  : ['jpg', 'jpeg', 'png', 'webp'],
+    public_id        : buildPublicId(file),
+    resource_type    : 'image',
+    transformation   : [{ quality: 'auto', fetch_format: 'auto' }],
+  }),
+});
+
+// Cloudinary storage for documents (PDF only)
+const cloudinaryDocumentStorage = new CloudinaryStorage({
+  cloudinary,
+  params: async (req, file) => ({
+    folder          : 'backend/documents',
+    allowed_formats : ['pdf'],
+    public_id       : buildPublicId(file),
+    resource_type   : 'raw', // PDFs are not images; use 'raw' resource_type
+  }),
+});
+
+// ── Storage: Local disk (development) ────────────────────────────────────────
+
+const buildLocalDiskStorage = (subFolder) =>
+  multer.diskStorage({
+    destination: (req, file, cb) => {
+      let dir = `${UPLOAD_DIR}/temp`;
+      if      (req.baseUrl?.includes('student')) dir = `${UPLOAD_DIR}/students`;
+      else if (req.baseUrl?.includes('teacher')) dir = `${UPLOAD_DIR}/teachers`;
+      else if (req.baseUrl?.includes('campus'))  dir = `${UPLOAD_DIR}/campuses`;
+      else if (req.baseUrl?.includes('parent'))  dir = `${UPLOAD_DIR}/parents`;
+      else if (subFolder)                        dir = `${UPLOAD_DIR}/${subFolder}`;
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext    = path.extname(file.originalname || '').toLowerCase();
+      const base   = path.basename(file.originalname || 'file', ext)
+        .replace(/[^a-z0-9]/gi, '-')
+        .toLowerCase()
+        .slice(0, 50);
+      const suffix = crypto.randomBytes(8).toString('hex');
+      cb(null, `${base}-${suffix}${ext}`);
+    },
+  });
+
+// ── File filters ──────────────────────────────────────────────────────────────
+
+const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp']);
+const ALLOWED_DOC_TYPES   = new Set(['application/pdf']);
+
+/** Accept JPEG / PNG / WEBP only — GIF excluded (not useful for school management). */
 const imageFilter = (req, file, cb) => {
-  try {
-    // Allowed MIME types
-    const allowedMimeTypes = [
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'image/webp',
-      'image/gif'
-    ];
-    
-    // Allowed extensions
-    const allowedExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
-    
-    // Safely extract extension
-    const filename = file.originalname || '';
-    
-    // Log pour debug (à supprimer en production)
-    console.log('📁 File validation:', {
-      fieldname: file.fieldname,
-      originalname: file.originalname,
-      mimetype: file.mimetype,
-      size: file.size
-    });
-    
-    if (!filename) {
-      console.error('❌ No filename provided');
-      return cb(new Error('No filename provided'), false);
-    }
-    
-    const ext = path.extname(filename).toLowerCase();
-    
-    if (!ext) {
-      console.error('❌ No file extension found');
-      return cb(new Error('File must have an extension'), false);
-    }
-
-    const mimeValid = allowedMimeTypes.includes(file.mimetype);
-    const extValid = allowedExtensions.includes(ext);
-    
-    console.log('✓ Validation:', { 
-      ext, 
-      mimeValid, 
-      extValid,
-      mimetype: file.mimetype 
-    });
-    
-    if (!mimeValid) {
-      console.error(`❌ Invalid MIME type: ${file.mimetype}`);
-      return cb(
-        new Error(`Invalid file type "${file.mimetype}". Only JPEG, PNG, WEBP, and GIF images are allowed.`), 
-        false
-      );
-    }
-    
-    if (!extValid) {
-      console.error(`❌ Invalid extension: ${ext}`);
-      return cb(
-        new Error(`Invalid file extension "${ext}". Only .jpg, .jpeg, .png, .webp, .gif are allowed.`), 
-        false
-      );
-    }
-    
-    console.log('✅ File validation passed');
-    cb(null, true);
-    
-  } catch (error) {
-    console.error('❌ Error in imageFilter:', error);
-    cb(new Error('File validation error: ' + error.message), false);
+  if (IS_PRODUCTION) {
+    // In dev, log to assist debugging; in prod keep logs clean
+    /* eslint-disable-next-line no-console */
+  } else {
+    console.log(`[Upload] imageFilter — ${file.fieldname} | ${file.mimetype} | ${file.originalname}`);
   }
-};
 
-/**
- * Document File Filter
- */
-const documentFilter = (req, file, cb) => {
-  try {
-    const allowedMimeTypes = [
-      'application/pdf',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/vnd.ms-excel',
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'text/csv'
-    ];
-    
-    const allowedExtensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv'];
-    
-    const filename = file.originalname || '';
-    if (!filename) {
-      return cb(new Error('No filename provided'), false);
-    }
-    
-    const ext = path.extname(filename).toLowerCase();
-    const mimeValid = allowedMimeTypes.includes(file.mimetype);
-    const extValid = allowedExtensions.includes(ext);
-    
-    console.log('📄 Document validation:', { 
-      filename, 
-      ext, 
-      mimetype: file.mimetype,
-      mimeValid, 
-      extValid 
-    });
-    
-    if (mimeValid && extValid) {
-      cb(null, true);
-    } else {
-      cb(
-        new Error('Invalid document type. Only PDF, DOC, DOCX, XLS, XLSX, CSV are allowed.'), 
-        false
-      );
-    }
-  } catch (error) {
-    console.error('❌ Error in documentFilter:', error);
-    cb(new Error('Document validation error: ' + error.message), false);
+  if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
+    return cb(
+      new Error(`Invalid image type "${file.mimetype}". Allowed: JPEG, PNG, WEBP.`),
+      false,
+    );
   }
-};
-
-/**
- * Permissive Filter
- */
-const anyFileFilter = (req, file, cb) => {
   cb(null, true);
 };
 
-// ========================================
-// MULTER CONFIGURATIONS
-// ========================================
-
 /**
- * Campus Image Upload
+ * Accept PDF documents only.
+ * CSV/Excel import files bypass this filter — they use memoryStorage directly.
  */
-const uploadCampusImage = multer({
-  storage: diskStorage,
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: 1
-  },
-  fileFilter: imageFilter
-}).single('campus_image');
+const documentFilter = (req, file, cb) => {
+  if (!ALLOWED_DOC_TYPES.has(file.mimetype)) {
+    return cb(
+      new Error(`Invalid document type "${file.mimetype}". Only PDF is accepted.`),
+      false,
+    );
+  }
+  cb(null, true);
+};
+
+// ── Multer instances ──────────────────────────────────────────────────────────
 
 /**
- * Profile Image Upload - FIXED
+ * Upload a profile image (students, teachers, parents).
+ * Field name: 'profileImage'
+ * Limit: 2 MB
  */
 const uploadProfileImage = multer({
-  storage: diskStorage,
-  limits: {
-    fileSize: MAX_PROFILE_SIZE,
-    files: 1
-  },
-  fileFilter: imageFilter
+  storage    : IS_PRODUCTION ? cloudinaryImageStorage : buildLocalDiskStorage(),
+  limits     : { fileSize: MAX_PROFILE_SIZE, files: 1 },
+  fileFilter : imageFilter,
 }).single('profileImage');
 
 /**
- * Multiple Images Upload
+ * Upload a campus cover image.
+ * Field name: 'campus_image'
+ * Limit: 5 MB
  */
-const uploadMultipleImages = (maxCount = 10) => multer({
-  storage: diskStorage,
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: maxCount
-  },
-  fileFilter: imageFilter
-}).array('images', maxCount);
+const uploadCampusImage = multer({
+  storage    : IS_PRODUCTION ? cloudinaryImageStorage : buildLocalDiskStorage('campuses'),
+  limits     : { fileSize: MAX_FILE_SIZE, files: 1 },
+  fileFilter : imageFilter,
+}).single('campus_image');
 
 /**
- * Document Upload
+ * Upload a PDF document.
+ * Field name: 'document'
+ * Limit: 10 MB
+ *
+ * Note: CSV/Excel import files are NOT handled here.
+ * They use multer.memoryStorage() inline in their respective routers
+ * (result.router.js, student.router.js, teacher.router.js) so they are
+ * parsed in memory and never written to disk or Cloudinary.
  */
 const uploadDocument = multer({
-  storage: diskStorage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB
-    files: 1
-  },
-  fileFilter: documentFilter
+  storage    : IS_PRODUCTION ? cloudinaryDocumentStorage : buildLocalDiskStorage('documents'),
+  limits     : { fileSize: MAX_DOC_SIZE, files: 1 },
+  fileFilter : documentFilter,
 }).single('document');
 
-/**
- * Multiple Fields Upload
- */
-const uploadMultipleFields = (fields) => multer({
-  storage: diskStorage,
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: 10
-  },
-  fileFilter: imageFilter
-}).fields(fields);
+// ── Error handling ────────────────────────────────────────────────────────────
 
 /**
- * Any File Upload
- */
-const uploadAnyFile = multer({
-  storage: diskStorage,
-  limits: {
-    fileSize: MAX_FILE_SIZE,
-    files: 1
-  },
-  fileFilter: anyFileFilter
-}).single('file');
-
-// ========================================
-// ERROR HANDLING MIDDLEWARE - ENHANCED
-// ========================================
-
-/**
- * Multer Error Handler - ENHANCED
- * ✅ Better error messages and logging
+ * Express error middleware for Multer errors.
+ * Must be placed after each upload middleware in the route chain:
+ *   router.post('/', uploadProfileImage, handleMulterError, controller)
  */
 const handleMulterError = (err, req, res, next) => {
-  // Log l'erreur complète pour debug
-  if (err) {
-    console.error('❌ Multer Error:', {
-      name: err.name,
-      message: err.message,
-      code: err.code,
-      field: err.field,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
+  if (!err) return next();
+
+  if (!IS_PRODUCTION) {
+    console.error('[Upload] Multer error:', { code: err.code, message: err.message });
   }
 
   if (err instanceof multer.MulterError) {
-    // Multer-specific errors
-    switch (err.code) {
-      case 'LIMIT_FILE_SIZE':
-        return res.status(400).json({
-          success: false,
-          message: 'File too large',
-          error: `Maximum file size is ${MAX_PROFILE_SIZE / 1024 / 1024}MB for profile images`
-        });
-      
-      case 'LIMIT_FILE_COUNT':
-        return res.status(400).json({
-          success: false,
-          message: 'Too many files',
-          error: err.message
-        });
-      
-      case 'LIMIT_UNEXPECTED_FILE':
-        return res.status(400).json({
-          success: false,
-          message: 'Unexpected field',
-          error: `Invalid file field name. Expected: ${err.field}`
-        });
-      
-      case 'LIMIT_PART_COUNT':
-      case 'LIMIT_FIELD_KEY':
-      case 'LIMIT_FIELD_VALUE':
-      case 'LIMIT_FIELD_COUNT':
-        return res.status(400).json({
-          success: false,
-          message: 'Request format error',
-          error: err.message
-        });
-      
-      default:
-        return res.status(400).json({
-          success: false,
-          message: 'File upload error',
-          error: err.message
-        });
-    }
-  } else if (err) {
-    // Custom file filter errors or other errors
+    const messages = {
+      LIMIT_FILE_SIZE     : `File too large. Maximum allowed: ${MAX_PROFILE_SIZE / 1024 / 1024} MB for images, ${MAX_DOC_SIZE / 1024 / 1024} MB for documents.`,
+      LIMIT_FILE_COUNT    : 'Too many files uploaded.',
+      LIMIT_UNEXPECTED_FILE: `Unexpected field: "${err.field}". Check the field name.`,
+    };
     return res.status(400).json({
-      success: false,
-      message: 'File validation error',
-      error: err.message
+      success : false,
+      message : messages[err.code] || 'File upload error.',
     });
   }
-  
-  next();
+
+  // Custom filter errors (invalid type, etc.)
+  return res.status(400).json({
+    success : false,
+    message : err.message || 'File validation error.',
+  });
 };
 
-// ========================================
-// UTILITY FUNCTIONS
-// ========================================
+// ── Utilities ─────────────────────────────────────────────────────────────────
 
 /**
- * Clean up uploaded file on error
+ * Delete a locally uploaded file on error (development only).
+ * In production (Cloudinary), files are managed remotely; this is a no-op.
+ * Called by genericEntity.controller.js in catch blocks.
+ *
+ * @param {Express.Multer.File} file - The file object from req.file
  */
 const cleanupUploadedFile = async (file) => {
-  if (file && file.path) {
-    try {
-      await fs.unlink(file.path);
-      console.log(`🗑️  Cleaned up file: ${file.path}`);
-    } catch (error) {
-      console.error(`❌ Failed to cleanup file: ${file.path}`, error);
-    }
+  if (!file?.path || IS_PRODUCTION) return;
+  try {
+    await fs.unlink(file.path);
+  } catch {
+    // Silently ignore — file may have already been removed
   }
 };
 
 /**
- * Clean up multiple uploaded files
- */
-const cleanupUploadedFiles = async (files) => {
-  if (!files) return;
-  
-  if (Array.isArray(files)) {
-    for (const file of files) {
-      await cleanupUploadedFile(file);
-    }
-    return;
-  }
-  
-  if (typeof files === 'object') {
-    for (const fieldName in files) {
-      const fieldFiles = files[fieldName];
-      if (Array.isArray(fieldFiles)) {
-        for (const file of fieldFiles) {
-          await cleanupUploadedFile(file);
-        }
-      } else {
-        await cleanupUploadedFile(fieldFiles);
-      }
-    }
-  }
-};
-
-/**
- * Get file URL for response
+ * Build a public URL for a locally uploaded file (development only).
+ * In production, Cloudinary returns the URL directly in file.path.
+ * Called by campus.controller.js (imported but not yet actively used in routes).
+ *
+ * @param {Express.Multer.File|null} file
+ * @returns {string|null}
  */
 const getFileUrl = (file) => {
   if (!file) return null;
-  
-  const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
-  const publicPath = file.path.replace(/^uploads\//, '');
-  
+  // Cloudinary sets file.path to the remote URL in production
+  if (IS_PRODUCTION) return file.path || null;
+  const baseUrl    = process.env.BASE_URL || 'http://localhost:5000';
+  const publicPath = file.path.replace(/\\/g, '/').replace(/^.*uploads\//, '');
   return `${baseUrl}/uploads/${publicPath}`;
 };
 
-// ========================================
-// EXPORTS
-// ========================================
+// ── Exports ───────────────────────────────────────────────────────────────────
 
 module.exports = {
-  // Main upload middleware
-  uploadCampusImage,
+  // Multer middleware (one name per responsibility)
   uploadProfileImage,
-  uploadMultipleImages,
+  uploadCampusImage,
   uploadDocument,
-  uploadMultipleFields,
-  uploadAnyFile,
-  
+
   // Error handling
   handleMulterError,
-  
-  // Utilities
+
+  // Utilities consumed by controllers
   cleanupUploadedFile,
-  cleanupUploadedFiles,
   getFileUrl,
-  setUploadFolder,
-  
-  // Storage configurations
-  diskStorage,
-  memoryStorage,
-  
-  // Filters
-  imageFilter,
-  documentFilter,
-  anyFileFilter,
-  
-  // Constants
+
+  // Exposed for tests / edge cases
   MAX_FILE_SIZE,
   MAX_PROFILE_SIZE,
-  UPLOAD_DIR
+  UPLOAD_DIR,
 };
