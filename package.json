@@ -6,7 +6,8 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "postinstall": "node -e \"console.log('Dependencies installed')\"",
-    "test": "echo \"No tests configured\""
+    "test": "echo \"No tests configured\"",
+    "lint": "echo 'No lint configured'"
   },
   "engines": {
     "node": "20.x"
