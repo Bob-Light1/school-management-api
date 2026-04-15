@@ -14,10 +14,10 @@ const Department = require('../models/department.model');
 
 const campusConfig = require('../configs/campus.config');
 const studentConfig = require('../configs/student.config');
-const { uploadImage } = require('../utils/fileUpload');
-const { getFileUrl, uploadBufferToCloudinary } = require('../middleware/upload/upload');
+const crypto = require('crypto');
 
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const { uploadImage } = require('../utils/fileUpload');
+const { getFileUrl } = require('../middleware/upload/upload');
 
 const {
   sendSuccess,
@@ -88,52 +88,61 @@ class CampusController extends GenericEntityController {
   }
 
   /**
-   * Campus creation is special because:
-   * 1. Campus doesn't belong to another campus
-   * 2. Campus has unique fields (manager_name, campus_name, location)
-   * 
-   * @route   POST /api/campus/create
-   * @access  Private
+   * Generate a signed Cloudinary upload signature.
+   * The browser uses this to upload the campus image directly to Cloudinary,
+   * bypassing the backend entirely and eliminating any server-side upload hang.
+   *
+   * @route  GET /api/campus/upload-signature
+   * @access ADMIN, DIRECTOR
    */
+  getUploadSignature = (req, res) => {
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder    = 'backend/campuses';
 
+    // Cloudinary signature: SHA-1( sorted_params + api_secret )
+    const signature = crypto
+      .createHash('sha1')
+      .update(`folder=${folder}&timestamp=${timestamp}${process.env.CLOUDINARY_API_SECRET}`)
+      .digest('hex');
+
+    return sendSuccess(res, 200, 'Upload signature generated', {
+      signature,
+      timestamp,
+      folder,
+      cloudName : process.env.CLOUDINARY_CLOUD_NAME,
+      apiKey    : process.env.CLOUDINARY_API_KEY,
+    });
+  };
+
+  /**
+   * Create a new campus.
+   * The campus image has already been uploaded directly to Cloudinary by the
+   * browser — this endpoint only receives the resulting secure URL.
+   *
+   * @route  POST /api/campus/create
+   * @access ADMIN, DIRECTOR
+   */
   create = async (req, res) => {
-    const fields = req.body;
+    const {
+      email,
+      password,
+      campus_name,
+      manager_name,
+      campus_number,
+      manager_phone,
+      campus_image,     // Cloudinary secure_url sent by the browser
+    } = req.body;
 
-    // ── 1. Validate file presence (before opening a DB session) ───────────────
-    if (!req.file) {
-      return sendError(res, 400, 'Campus image is required.');
+    // ── 1. Validate campus_image URL ──────────────────────────────────────────
+    if (!campus_image || typeof campus_image !== 'string') {
+      return sendError(res, 400, 'Campus image URL is required. Please upload an image first.');
     }
 
-    // ── 2. Upload image to Cloudinary with explicit timeout ────────────────────
-    // Done BEFORE the DB transaction so a slow/hanging upload never blocks
-    // MongoDB resources and always surfaces a clear error to the frontend.
-    let campus_image;
-    if (IS_PRODUCTION) {
-      try {
-        campus_image = await uploadBufferToCloudinary(req.file, 'backend/campuses');
-      } catch (uploadError) {
-        console.error('❌ Cloudinary upload error:', uploadError.message);
-        return sendError(res, 503, uploadError.message || 'Image upload failed. Please try again.');
-      }
-    } else {
-      campus_image = getFileUrl(req.file);
-    }
-
-    // ── 3. DB transaction ──────────────────────────────────────────────────────
+    // ── 2. DB transaction ──────────────────────────────────────────────────────
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-      const {
-        email,
-        password,
-        campus_name,
-        manager_name,
-        campus_number,
-        manager_phone
-      } = fields;
-
-      // Validate required fields
       if (!email || !password || !campus_name || !manager_name || !manager_phone) {
         await session.abortTransaction();
         return sendError(res, 400, 'All required fields must be provided', {
@@ -163,7 +172,7 @@ class CampusController extends GenericEntityController {
         return sendConflict(res, 'A campus with this email is already registered');
       }
 
-      const location = parseLocation(fields);
+      const location = parseLocation(req.body);
 
       const salt = await bcrypt.genSalt(SALT_ROUNDS);
       const hashedPassword = await bcrypt.hash(password, salt);
@@ -999,6 +1008,7 @@ module.exports = {
   deleteCampus: campusController.archive,
 
   // Campus-specific operations
+  getUploadSignature: campusController.getUploadSignature,
   createCampus: campusController.create,
   getOneCampus: campusController.getOne,
   loginCampus: campusController.login,

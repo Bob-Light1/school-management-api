@@ -1,9 +1,10 @@
 const express = require('express');
-const { 
-  createCampus, 
-  getAllCampus, 
-  loginCampus, 
-  updateCampus, 
+const {
+  getUploadSignature,
+  createCampus,
+  getAllCampus,
+  loginCampus,
+  updateCampus,
   getOneCampus,
   updateCampusPassword,
   deleteCampus,
@@ -63,16 +64,26 @@ router.use(authenticate);
 // ========================================
 
 /**
+ * @route   GET /api/campus/upload-signature
+ * @desc    Return a signed Cloudinary upload params so the browser can upload
+ *          the campus image directly to Cloudinary (no backend file transfer).
+ * @access  ADMIN, DIRECTOR only
+ */
+router.get(
+  "/upload-signature",
+  authorize(['ADMIN', 'DIRECTOR']),
+  getUploadSignature
+);
+
+/**
  * @route   POST /api/campus/create
- * @desc    Create a new campus
+ * @desc    Create a new campus (campus_image is a Cloudinary URL sent by the browser)
  * @access  ADMIN, DIRECTOR only
  */
 router.post(
   "/create",
   strictLimiter,
   authorize(['ADMIN', 'DIRECTOR']),
-  uploadCampusImageMemory, // Memory storage — controller uploads to Cloudinary with timeout
-  handleMulterError,
   createCampus
 );
 
