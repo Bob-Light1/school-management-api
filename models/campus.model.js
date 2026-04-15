@@ -164,6 +164,7 @@ campusSchema.pre('save', function (next) {
   if (this.campus_number) {
     this.campus_number = this.campus_number.toUpperCase().trim();
   }
+  next();
 });
 
 // **METHODS**
