@@ -138,37 +138,27 @@ class CampusController extends GenericEntityController {
       return sendError(res, 400, 'Campus image URL is required. Please upload an image first.');
     }
 
-    // ── 2. DB transaction ──────────────────────────────────────────────────────
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
     try {
       if (!email || !password || !campus_name || !manager_name || !manager_phone) {
-        await session.abortTransaction();
         return sendError(res, 400, 'All required fields must be provided', {
           required: ['email', 'password', 'campus_name', 'manager_name', 'manager_phone']
         });
       }
 
       if (!isValidEmail(email)) {
-        await session.abortTransaction();
         return sendError(res, 400, 'Invalid email format');
       }
 
       const passwordValidation = validatePasswordStrength(password);
       if (!passwordValidation.valid) {
-        await session.abortTransaction();
         return sendError(res, 400, 'Password does not meet requirements', {
           errors: passwordValidation.errors
         });
       }
 
-      const existingCampus = await Campus.findOne({
-        email: email.toLowerCase()
-      }).session(session);
+      const existingCampus = await Campus.findOne({ email: email.toLowerCase() });
 
       if (existingCampus) {
-        await session.abortTransaction();
         return sendConflict(res, 'A campus with this email is already registered');
       }
 
@@ -189,9 +179,7 @@ class CampusController extends GenericEntityController {
       };
 
       const campus = new Campus(campusData);
-      const savedCampus = await campus.save({ session });
-
-      await session.commitTransaction();
+      const savedCampus = await campus.save();
 
       if (this.afterCreate) {
         await this.afterCreate(savedCampus);
@@ -204,7 +192,6 @@ class CampusController extends GenericEntityController {
       return sendCreated(res, 'Campus registered successfully', response);
 
     } catch (error) {
-      await session.abortTransaction();
       console.error('❌ Campus creation error:', error);
 
       const { handleDuplicateKeyError } = require('../utils/responseHelpers');
@@ -216,8 +203,6 @@ class CampusController extends GenericEntityController {
       }
 
       return sendError(res, 500, 'Failed to register campus. Please try again');
-    } finally {
-      session.endSession();
     }
   };
 
