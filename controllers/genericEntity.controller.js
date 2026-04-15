@@ -404,7 +404,8 @@ class GenericEntityController {
 
       // Authorization
       if (req.user.role === 'CAMPUS_MANAGER') {
-        if (entity.schoolCampus.toString() !== req.user.campusId) {
+        const campusRef = entity.schoolCampus ?? entity._id;
+        if (campusRef.toString() !== req.user.campusId) {
           return sendError(res, 403, `Can only update ${this.entityNameLower}s from your campus`);
         }
       } else if (!['ADMIN', 'DIRECTOR'].includes(req.user.role)) {
@@ -496,7 +497,8 @@ class GenericEntityController {
       }
 
       if (req.user.role === 'CAMPUS_MANAGER') {
-        if (entity.schoolCampus.toString() !== req.user.campusId) {
+        const campusRef = entity.schoolCampus ?? entity._id;
+        if (campusRef.toString() !== req.user.campusId) {
           return sendError(res, 403, `Can only archive ${this.entityNameLower}s from your campus`);
         }
       }
