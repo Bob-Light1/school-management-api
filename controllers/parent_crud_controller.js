@@ -37,9 +37,20 @@ const {
   buildCampusFilter,
 } = require('../utils/validationHelpers');
 
+const { getFileUrl } = require('../middleware/upload/upload');
+
 const SALT_ROUNDS  = 12;
 const MGMT_ROLES   = ['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER'];
 const GLOBAL_ROLES = ['ADMIN', 'DIRECTOR'];
+
+/**
+ * Normalize a field that multer may deliver as a bare string when only one
+ * value is appended (fd.append('children', id) × 1 → string, not array).
+ */
+const toArray = (v) => {
+  if (v === undefined || v === null) return undefined;
+  return Array.isArray(v) ? v : [v];
+};
 
 // ── AUDIT LOG ─────────────────────────────────────────────────────────────────
 
@@ -102,6 +113,16 @@ const createParent = async (req, res) => {
     // Strip notes for non-admin roles
     if (!GLOBAL_ROLES.includes(req.user.role) && req.user.role !== 'CAMPUS_MANAGER') {
       delete body.notes;
+    }
+
+    // Profile image uploaded via multer (multipart/form-data)
+    if (req.file) {
+      body.profileImage = getFileUrl(req.file);
+    }
+
+    // Normalize children: multer returns a string when only 1 value is sent
+    if (body.children !== undefined) {
+      body.children = toArray(body.children) ?? [];
     }
 
     const parent = await Parent.create(body);
@@ -244,8 +265,15 @@ const updateParent = async (req, res) => {
     // Strip immutable / sensitive fields
     const { password, parentRef, isArchived, lastLogin, schoolCampus: _sc, ...updates } = req.body;
 
-    // CAMPUS_MANAGER cannot move a parent to a different campus
-    // ADMIN/DIRECTOR can (but we don't expose it through this endpoint either — use createParent)
+    // Profile image uploaded via multer (multipart/form-data)
+    if (req.file) {
+      updates.profileImage = getFileUrl(req.file);
+    }
+
+    // Normalize children: multer returns a string when only 1 value is sent
+    if (updates.children !== undefined) {
+      updates.children = toArray(updates.children) ?? [];
+    }
 
     const parent = await Parent.findOneAndUpdate(
       { _id: id, ...campusFilter, isArchived: false },

@@ -188,10 +188,22 @@ const runValidation = (body, isCreate) => {
 // ── MIDDLEWARE EXPORTS ────────────────────────────────────────────────────────
 
 /**
+ * Multer delivers repeated form fields as a bare string when only one value is
+ * appended (fd.append('children', id) × 1 → string, not array).
+ * Normalize to array before validation so "1 child selected" doesn't fail.
+ */
+const normalizeChildren = (req) => {
+  if (req.body.children !== undefined && !Array.isArray(req.body.children)) {
+    req.body.children = req.body.children ? [req.body.children] : [];
+  }
+};
+
+/**
  * Validates a parent creation request body.
  * @route POST /api/parents
  */
 const validateCreateParent = (req, res, next) => {
+  normalizeChildren(req);
   const errors = runValidation(req.body, true);
   if (errors.length > 0) {
     return res.status(400).json({ success: false, message: 'Validation failed.', errors });
@@ -204,6 +216,7 @@ const validateCreateParent = (req, res, next) => {
  * @route PUT /api/parents/:id
  */
 const validateUpdateParent = (req, res, next) => {
+  normalizeChildren(req);
   const errors = runValidation(req.body, false);
   if (errors.length > 0) {
     return res.status(400).json({ success: false, message: 'Validation failed.', errors });

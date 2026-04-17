@@ -48,6 +48,12 @@ const router = express.Router();
 const { authenticate, authorize } = require('../middleware/auth/auth');
 const { loginLimiter, apiLimiter } = require('../middleware/rate-limiter/rate-limiter');
 
+// ── FILE UPLOAD (multer) ──────────────────────────────────────────────────────
+const {
+  uploadProfileImage: multerProfileImage,
+  handleMulterError,
+} = require('../middleware/upload/upload');
+
 // ── CONTROLLERS ───────────────────────────────────────────────────────────────
 const {
   loginParent,
@@ -96,7 +102,6 @@ const { validateParentChildren } =
 
 // ── ROLE SHORTHANDS ───────────────────────────────────────────────────────────
 const MANAGERS = ['ADMIN', 'DIRECTOR', 'CAMPUS_MANAGER'];
-const GLOBAL   = ['ADMIN', 'DIRECTOR'];
 
 // ════════════════════════════════════════════════════════════════════════════
 // PUBLIC ROUTES
@@ -267,7 +272,14 @@ router.get(
  * @route  POST /api/parents
  * @access ADMIN | DIRECTOR | CAMPUS_MANAGER
  */
-router.post('/', authorize(MANAGERS), validateCreateParent, createParent);
+router.post(
+  '/',
+  authorize(MANAGERS),
+  multerProfileImage,
+  handleMulterError,
+  validateCreateParent,
+  createParent
+);
 
 /**
  * @route  GET /api/parents
@@ -285,7 +297,14 @@ router.get('/:id', authorize(MANAGERS), getParentById);
  * @route  PUT /api/parents/:id
  * @access ADMIN | DIRECTOR | CAMPUS_MANAGER
  */
-router.put('/:id', authorize(MANAGERS), validateUpdateParent, updateParent);
+router.put(
+  '/:id',
+  authorize(MANAGERS),
+  multerProfileImage,
+  handleMulterError,
+  validateUpdateParent,
+  updateParent
+);
 
 /**
  * @route  PATCH /api/parents/:id/status
