@@ -11,6 +11,8 @@ const Student = require('../models/student.model');
 const Class = require('../models/class.model');
 const Subject = require('../models/subject.model');
 const Department = require('../models/department.model');
+const StudentAttendance = require('../models/studentAttend.model');
+const Income = require('../models/income.model');
 
 const campusConfig = require('../configs/campus.config');
 const studentConfig = require('../configs/student.config');
@@ -517,13 +519,17 @@ class CampusController extends GenericEntityController {
 
       const firstDayOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 
+      const campusOid = new mongoose.Types.ObjectId(campusId);
+
       const [
         studentsTotal,
         teachersTotal,
         classesTotal,
         activeClasses,
         recentStudents,
-        recentTeachers
+        recentTeachers,
+        attendanceStats,
+        paymentAlerts,
       ] = await Promise.all([
         Student.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
         Teacher.countDocuments({ schoolCampus: campusId, status: { $ne: 'archived' } }),
@@ -538,8 +544,33 @@ class CampusController extends GenericEntityController {
           schoolCampus: campusId,
           createdAt: { $gte: firstDayOfMonth },
           status: { $ne: 'archived' }
-        })
+        }),
+        // Campus-wide average absence rate from attendance records
+        StudentAttendance.aggregate([
+          { $match: { schoolCampus: campusOid } },
+          {
+            $group: {
+              _id:           '$student',
+              totalSessions: { $sum: 1 },
+              absentCount:   { $sum: { $cond: [{ $eq: ['$status', false] }, 1, 0] } },
+            },
+          },
+          {
+            $group: {
+              _id:            null,
+              avgAbsenceRate: {
+                $avg: {
+                  $multiply: [{ $divide: ['$absentCount', '$totalSessions'] }, 100],
+                },
+              },
+            },
+          },
+        ]),
+        // Pending income records as payment alerts
+        Income.countDocuments({ campus: campusId, status: 'pending' }),
       ]);
+
+      const avgAbsenceRate = attendanceStats[0]?.avgAbsenceRate ?? 0;
 
       return sendSuccess(res, 200, 'Dashboard statistics fetched successfully', {
         students: {
@@ -553,7 +584,9 @@ class CampusController extends GenericEntityController {
         classes: {
           total: classesTotal,
           active: activeClasses
-        }
+        },
+        avgAbsenceRate: Math.round(avgAbsenceRate * 10) / 10,
+        paymentAlerts,
       });
 
     } catch (error) {
