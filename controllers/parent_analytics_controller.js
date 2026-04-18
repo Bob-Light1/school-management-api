@@ -20,7 +20,6 @@ const Parent = require('../models/parent.model');
 const {
   sendSuccess,
   sendError,
-  sendNotFound,
 } = require('../utils/responseHelpers');
 const { buildCampusFilter } = require('../utils/validationHelpers');
 
@@ -36,6 +35,22 @@ const getCampusFilter = (user, requestedCampusId) => {
     err.statusCode = 403;
     throw err;
   }
+};
+
+/**
+ * Cast the `schoolCampus` field to ObjectId for aggregation $match stages.
+ *
+ * Mongoose auto-casts string IDs in find() / countDocuments() queries, but
+ * MongoDB aggregation pipelines do NOT — they perform a strict type comparison.
+ * Without this cast every $match on schoolCampus returns 0 documents for any
+ * campus-scoped user whose JWT carries campusId as a plain string.
+ */
+const castForAggregation = (filter) => {
+  if (!filter.schoolCampus) return filter;
+  return {
+    ...filter,
+    schoolCampus: new mongoose.Types.ObjectId(String(filter.schoolCampus)),
+  };
 };
 
 // ── PLATFORM-WIDE PARENT STATS ────────────────────────────────────────────────
@@ -58,13 +73,13 @@ const getParentStats = async (req, res) => {
 
         // Status breakdown
         Parent.aggregate([
-          { $match: { ...campusFilter, isArchived: false } },
+          { $match: { ...castForAggregation(campusFilter), isArchived: false } },
           { $group: { _id: '$status', count: { $sum: 1 } } },
         ]),
 
         // Relationship breakdown
         Parent.aggregate([
-          { $match: { ...campusFilter, isArchived: false } },
+          { $match: { ...castForAggregation(campusFilter), isArchived: false } },
           { $group: { _id: '$relationship', count: { $sum: 1 } } },
         ]),
 
@@ -122,35 +137,38 @@ const getCampusParentStats = async (req, res) => {
     // Enforce isolation: CAMPUS_MANAGER may only query their own campus
     const campusFilter = getCampusFilter(req.user, campusId);
 
+    const aggFilter = castForAggregation(campusFilter);
+
     const [
       statusBreakdown,
       relationshipBreakdown,
       genderBreakdown,
       childrenDistribution,
       monthlyRegistrations,
+      recentCount,
     ] = await Promise.all([
 
       // Status breakdown
       Parent.aggregate([
-        { $match: { ...campusFilter, isArchived: false } },
+        { $match: { ...aggFilter, isArchived: false } },
         { $group: { _id: '$status', count: { $sum: 1 } } },
       ]),
 
       // Relationship breakdown
       Parent.aggregate([
-        { $match: { ...campusFilter, isArchived: false } },
+        { $match: { ...aggFilter, isArchived: false } },
         { $group: { _id: '$relationship', count: { $sum: 1 } } },
       ]),
 
       // Gender breakdown
       Parent.aggregate([
-        { $match: { ...campusFilter, isArchived: false } },
+        { $match: { ...aggFilter, isArchived: false } },
         { $group: { _id: '$gender', count: { $sum: 1 } } },
       ]),
 
       // Distribution of children count per parent
       Parent.aggregate([
-        { $match: { ...campusFilter, isArchived: false } },
+        { $match: { ...aggFilter, isArchived: false } },
         {
           $group: {
             _id:   { $size: '$children' },
@@ -164,7 +182,7 @@ const getCampusParentStats = async (req, res) => {
       Parent.aggregate([
         {
           $match: {
-            ...campusFilter,
+            ...aggFilter,
             createdAt: { $gte: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000) },
           },
         },
@@ -179,6 +197,13 @@ const getCampusParentStats = async (req, res) => {
         },
         { $sort: { '_id.year': 1, '_id.month': 1 } },
       ]),
+
+      // Parents created in the last 30 days (countDocuments auto-casts, no need for aggFilter)
+      Parent.countDocuments({
+        ...campusFilter,
+        isArchived: false,
+        createdAt:  { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+      }),
     ]);
 
     const total  = statusBreakdown.reduce((sum, s) => sum + s.count, 0);
@@ -186,6 +211,7 @@ const getCampusParentStats = async (req, res) => {
     return sendSuccess(res, 200, 'Campus parent statistics retrieved successfully.', {
       campusId,
       total,
+      recentLast30d:  recentCount,
       byStatus:       Object.fromEntries(statusBreakdown.map((s) => [s._id, s.count])),
       byRelationship: Object.fromEntries(relationshipBreakdown.map((r) => [r._id, r.count])),
       byGender:       Object.fromEntries(genderBreakdown.map((g) => [g._id, g.count])),
